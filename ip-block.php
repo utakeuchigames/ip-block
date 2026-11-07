@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.2.2
+ * Version:     1.2.3
  * Author:      utakeuchigames
  * Author URI:  https://github.com/utakeuchigames
  * License:     GPL2
@@ -16,6 +16,15 @@ if (!defined('ABSPATH')) {
 
 if (!defined('URL_ROOT')) {
     define('URL_ROOT', plugin_dir_path(__FILE__));
+}
+
+// プラグインをアプデしてもデータが消えないよう、アップロードフォルダ内に専用のデータ保存ディレクトリを定義
+$upload_dir = wp_upload_dir();
+define('IP_BLOCK_DATA_DIR', $upload_dir['basedir'] . '/ip-block-data/');
+
+// データ保存用ディレクトリがなければ自動作成する
+if (!file_exists(IP_BLOCK_DATA_DIR)) {
+    wp_mkdir_p(IP_BLOCK_DATA_DIR);
 }
 
 // 1. Plugin Update Checker (v5/v6対応) の組み込み
@@ -134,7 +143,7 @@ function check_white_list($ip) {
         return true;
     }
 
-    $whiteFile = URL_ROOT . '.white.env';
+    $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
     $rules = parse_env_file_rules($whiteFile);
     
     foreach ($rules as $range) {
@@ -149,7 +158,7 @@ function check_white_list($ip) {
  * ブロックリストチェック
  */
 function check_block_list($ip) {
-    $blockFile = URL_ROOT . '.block.env';
+    $blockFile = IP_BLOCK_DATA_DIR . '.block.env';
     $rules = parse_env_file_rules($blockFile);
     
     foreach ($rules as $range) {
@@ -237,7 +246,7 @@ add_action('init', function() {
     }
 
     // === 例外パス（スキップ対象）のチェック ===
-    $exceptionFile = URL_ROOT . '.exception.env';
+    $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.env';
     if (file_exists($exceptionFile)) {
         $exceptions = file($exceptionFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         $currentPath = $_SERVER['PHP_SELF'];
@@ -258,10 +267,9 @@ add_action('init', function() {
     $currentUri = $_SERVER['REQUEST_URI'];
 
     // --- A. レートリミット処理 (.access.env) ---
-    // 1秒以内のアクセスをチェックし、古いものは捨てる
     $limitCount = 5;       
     $timeWindow = 1.0;     
-    $accessFile = URL_ROOT . '.access.env';
+    $accessFile = IP_BLOCK_DATA_DIR . '.access.env';
 
     if (!file_exists($accessFile)) {
         file_put_contents($accessFile, "");
@@ -283,7 +291,6 @@ add_action('init', function() {
             $timestamp = (float)$timestamp;
             $count = (int)$count;
             
-            // 1秒経ったやつは消す（保持しない）
             if (($currentTime - $timestamp) < $timeWindow) {
                 if ($ip === $clientIp) {
                     $clientData = ['timestamp' => $timestamp, 'count' => $count];
@@ -297,7 +304,7 @@ add_action('init', function() {
             if ($clientData['count'] >= $limitCount) {
                 flock($fp, LOCK_UN);
                 fclose($fp);
-                addBlockedIp($clientIp, URL_ROOT . '.block.env');
+                addBlockedIp($clientIp, IP_BLOCK_DATA_DIR . '.block.env');
                 exit;
             }
             $newCount = $clientData['count'] + 1;
@@ -316,8 +323,8 @@ add_action('init', function() {
         fclose($fp);
     }
 
-    // --- B. 3ヶ月間のアクセス履歴・統計保存 (.history.env) ---
-    $historyFile = URL_ROOT . '.history.env';
+    // --- B. アクセス履歴・統計保存 (.history.env) ---
+    $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
     if (!file_exists($historyFile)) {
         file_put_contents($historyFile, "");
     }
@@ -326,7 +333,6 @@ add_action('init', function() {
     if (flock($fp_h, LOCK_EX)) {
         $historyData = [];
         $foundClient = false;
-        $threeMonthsAgo = $currentTime - (90 * 24 * 60 * 60);
 
         while (($line = fgets($fp_h)) !== false) {
             $line = trim($line);
@@ -339,17 +345,13 @@ add_action('init', function() {
             $timestamp = (float)$timestamp;
             $count = (int)$count;
 
-            // 3ヶ月（90日）以内のデータだけ残す
-            if ($timestamp >= $threeMonthsAgo) {
-                if ($ip === $clientIp) {
-                    $count++;
-                    $timestamp = $currentTime;
-                    $lastfile = $currentUri;
-                    ['foundClient' => $foundClient] = ['foundClient' => true]; // 簡易フラグ更新
-                    $foundClient = true;
-                }
-                $historyData[] = "{$ip} {$timestamp} {$count} {$lastfile}";
+            if ($ip === $clientIp) {
+                $count++;
+                $timestamp = $currentTime;
+                $lastfile = $currentUri;
+                $foundClient = true;
             }
+            $historyData[] = "{$ip} {$timestamp} {$count} {$lastfile}";
         }
 
         if (!$foundClient) {
@@ -417,11 +419,11 @@ add_action('admin_menu', function() {
 
 // --- 各サブメニューのページ描画関数 ---
 
-// 1. アクセス監視ダッシュボード（.history.envベース）
+// 1. アクセス監視ダッシュボード
 function ip_block_dashboard_page_html() {
     if (!current_user_can('manage_options')) return;
 
-    $historyFile = URL_ROOT . '.history.env';
+    $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
     $current_meip = get_server_meip();
 
     $active_accesses = [];
@@ -447,7 +449,7 @@ function ip_block_dashboard_page_html() {
     }
     ?>
     <div class="wrap">
-        <h1>アクセス状況・統計監視 (過去3ヶ月)</h1>
+        <h1>アクセス状況・統計監視 (全期間)</h1>
         <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html($current_meip); ?></code></p>
         
         <h2>📊 記録されているアクセス履歴</h2>
@@ -482,7 +484,7 @@ function ip_block_dashboard_page_html() {
 // 2. ブロックリスト設定画面
 function ip_block_blacklist_page_html() {
     if (!current_user_can('manage_options')) return;
-    $blockFile = URL_ROOT . '.block.env';
+    $blockFile = IP_BLOCK_DATA_DIR . '.block.env';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_blacklist_nonce');
@@ -509,7 +511,7 @@ function ip_block_blacklist_page_html() {
 // 3. ホワイトリスト設定画面
 function ip_block_whitelist_page_html() {
     if (!current_user_can('manage_options')) return;
-    $whiteFile = URL_ROOT . '.white.env';
+    $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_whitelist_nonce');
@@ -536,12 +538,12 @@ function ip_block_whitelist_page_html() {
 // 4. 例外パス設定画面
 function ip_block_exceptions_page_html() {
     if (!current_user_can('manage_options')) return;
-    $exceptionFile = URL_ROOT . '.exception.env';
+    $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.env';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_exceptions_nonce');
         if (isset($_POST['exception_content'])) {
-            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])));
+            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])))   ;
             echo '<div class="updated"><p><strong>例外パス設定を保存しました！</strong></p></div>';
         }
     }
