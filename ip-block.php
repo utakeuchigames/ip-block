@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.1.0
+ * Version:     1.2.0
  * Author:      utakeuchigames
  * Author URI:  https://github.com/utakeuchigames
  * License:     GPL2
@@ -14,7 +14,6 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// フォルダパスの定義（必要に応じて定数化）
 if (!defined('URL_ROOT')) {
     define('URL_ROOT', plugin_dir_path(__FILE__));
 }
@@ -41,7 +40,71 @@ if (file_exists(__DIR__ . '/plugin-update-checker/plugin-update-checker.php')) {
 }
 
 /**
- * IPアドレスまたはCIDR（サブネットマスク）にマッチするか判定する関数
+ * サーバー自身のIP（meip）をキャッシュ付きで取得
+ */
+function get_server_meip() {
+    $cached_ip = get_transient('ip_block_server_meip');
+    if ($cached_ip !== false) {
+        return $cached_ip;
+    }
+
+    $url = rest_url() ? home_url('/wp-content/plugins/ip-block/ip-get.php') : ('http://' . ($_SERVER['SERVER_NAME'] ?? 'localhost') . '/wp-content/plugins/ip-block/ip-get.php');
+    
+    $response = wp_remote_get($url, ['timeout' => 2]);
+    if (!is_wp_error($response)) {
+        $body = wp_remote_retrieve_body($response);
+        $data = json_decode($body, true);
+        if (isset($data['meip']) && !empty($data['meip'])) {
+            $meip = $data['meip'];
+            set_transient('ip_block_server_meip', $meip, HOUR_IN_SECONDS);
+            return $meip;
+        }
+    }
+
+    $fallback_ip = $_SERVER['SERVER_ADDR'] ?? gethostbyname(gethostname());
+    return $fallback_ip;
+}
+
+/**
+ * 設定ファイルから「#/ Clients can configure settings from here.」より下の有効なルールだけを抽出する関数
+ */
+function parse_env_file_rules($filepath) {
+    if (!file_exists($filepath)) return [];
+    
+    $lines = file($filepath, FILE_IGNORE_NEW_LINES);
+    if ($lines === false) return [];
+
+    $has_marker = false;
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#/ Clients can configure settings from here.') !== false) {
+            $has_marker = true;
+            break;
+        }
+    }
+
+    $rules = [];
+    $start_reading = !$has_marker; // マーカーがなければ最初から全て読む
+
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+        if (!$start_reading) {
+            if (strpos($trimmed, '#/ Clients can configure settings from here.') !== false) {
+                $start_reading = true;
+            }
+            continue;
+        }
+
+        // 空行やコメント行はスキップ
+        if ($trimmed === '' || $trimmed[0] === '#') {
+            continue;
+        }
+        $rules[] = $trimmed;
+    }
+    return $rules;
+}
+
+/**
+ * IPアドレスまたはCIDRにマッチするか判定
  */
 function ip_in_cidr($ip, $range) {
     if ($ip === $range) {
@@ -64,16 +127,18 @@ function ip_in_cidr($ip, $range) {
 }
 
 /**
- * ホワイトリスト（.white.env）チェック
+ * ホワイトリストチェック
  */
 function check_white_list($ip) {
+    $meip = get_server_meip();
+    if ($ip === $meip) {
+        return true;
+    }
+
     $whiteFile = URL_ROOT . '.white.env';
-    if (!file_exists($whiteFile)) return false;
+    $rules = parse_env_file_rules($whiteFile);
     
-    $lines = file($whiteFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        $range = trim($line);
-        if ($range === '' || $range[0] === '#') continue;
+    foreach ($rules as $range) {
         if (ip_in_cidr($ip, $range)) {
             return true;
         }
@@ -82,16 +147,13 @@ function check_white_list($ip) {
 }
 
 /**
- * ブロックリスト（.block.env）チェック
+ * ブロックリストチェック
  */
 function check_block_list($ip) {
     $blockFile = URL_ROOT . '.block.env';
-    if (!file_exists($blockFile)) return false;
+    $rules = parse_env_file_rules($blockFile);
     
-    $lines = file($blockFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        $range = trim($line);
-        if ($range === '' || $range[0] === '#') continue;
+    foreach ($rules as $range) {
         if (ip_in_cidr($ip, $range)) {
             return true;
         }
@@ -100,9 +162,14 @@ function check_block_list($ip) {
 }
 
 /**
- * ブロックリストへIPを追加する関数
+ * ブロックリストへIPを追加
  */
 function addBlockedIp($ip, $file) {
+    $meip = get_server_meip();
+    if ($ip === $meip) {
+        return;
+    }
+
     if (!filter_var($ip, FILTER_VALIDATE_IP)) {
         header('HTTP/1.1 403 Forbidden');
         if (file_exists(URL_ROOT . 'error/403.html')) {
@@ -116,7 +183,6 @@ function addBlockedIp($ip, $file) {
     $currentIps = file_exists($file) ? file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
     $currentIps = array_map('trim', $currentIps);
 
-    // すでに含まれていなければ追記
     $exists = false;
     foreach ($currentIps as $existing) {
         if (ip_in_cidr($ip, $existing)) {
@@ -156,13 +222,11 @@ add_action('init', function() {
 
     $clientIp = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
 
-    // ホワイトリストに含まれていれば完全スルー
     if (check_white_list($clientIp)) {
         $accesscheck = true;
         return;
     }
 
-    // ブロックリストに含まれていれば即死
     if (check_block_list($clientIp)) {
         header('HTTP/1.1 403 Forbidden');
         if (file_exists(URL_ROOT . 'error/403.html')) {
@@ -191,10 +255,10 @@ add_action('init', function() {
         }
     }
 
-    // === レートリミット（回数・頻度監視）の処理 ===
+    // === レートリミット処理 ===
     $currentTime = microtime(true);
-    $limitCount = 5;       // 1秒間の最大許可回数
-    $timeWindow = 1.0;     // 判定する時間（秒）
+    $limitCount = 5;       
+    $timeWindow = 1.0;     
     $envFile = URL_ROOT . '.access.env';
 
     if (!file_exists($envFile)) {
@@ -223,14 +287,13 @@ add_action('init', function() {
         if ($ip === $clientIp) {
             $clientData = ['timestamp' => $timestamp, 'count' => $count, 'lastfile' => $lastfile];
         } else {
-            if (($currentTime - $timestamp) < 60.0) { // 保持期間を少し広げて管理画面で見やすくする
+            if (($currentTime - $timestamp) < 60.0) {
                 $otherData[] = "{$ip} {$timestamp} {$count} {$lastfile}";
             }
         }
     }
 
     if ($clientData !== null) {
-        // 直近 $timeWindow 内の判定
         if (($currentTime - $clientData['timestamp']) < $timeWindow) {
             if ($clientData['count'] >= $limitCount) {
                 flock($fp, LOCK_UN);
@@ -262,7 +325,7 @@ add_action('init', function() {
     $accesscheck = true;
 });
 
-// 3. WordPress管理画面のサイドバーに設定メニューを追加
+// 3. WordPress管理画面の設定メニュー追加
 add_action('admin_menu', function() {
     add_menu_page(
         'IP Block 管理',
@@ -275,7 +338,7 @@ add_action('admin_menu', function() {
     );
 });
 
-// 管理画面のHTML描画と設定保存・リアルタイム監視データの表示
+// 管理画面のHTML描画
 function ip_block_settings_page_html() {
     if (!current_user_can('manage_options')) {
         return;
@@ -286,7 +349,6 @@ function ip_block_settings_page_html() {
     $whiteFile = URL_ROOT . '.white.env';
     $accessFile = URL_ROOT . '.access.env';
 
-    // フォーム送信時の保存処理
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_manage_nonce');
         
@@ -306,7 +368,8 @@ function ip_block_settings_page_html() {
     $exception_data = file_exists($exceptionFile) ? file_get_contents($exceptionFile) : '';
     $white_data = file_exists($whiteFile) ? file_get_contents($whiteFile) : '';
 
-    // アクセス状況の読み込み
+    $current_meip = get_server_meip();
+
     $active_accesses = [];
     if (file_exists($accessFile)) {
         $lines = file($accessFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -315,13 +378,17 @@ function ip_block_settings_page_html() {
             $parts = explode(' ', trim($line), 4);
             if (count($parts) >= 4) {
                 list($ip, $timestamp, $count, $lastfile) = $parts;
+                
+                // サーバー自身（meip）のアクセスログは管理画面のリストに表示させない（隠す）
+                if ($ip === $current_meip) {
+                    continue;
+                }
+
                 $timestamp = (float)$timestamp;
                 $count = (int)$count;
                 
-                // 経過時間と平均アクセス頻度の計算
                 $elapsed = $now - $timestamp;
                 if ($elapsed < 0) $elapsed = 0.001;
-                $avg_rate = $count / max($elapsed, 1.0); // 1秒あたりの平均件数目安
 
                 $active_accesses[] = [
                     'ip' => $ip,
@@ -337,23 +404,22 @@ function ip_block_settings_page_html() {
     ?>
     <div class="wrap">
         <h1>IP Block & アクセス監視管理</h1>
+        <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html($current_meip); ?></code></p>
         
         <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-            <!-- 設定フォームエリア -->
             <div style="flex: 1; min-width: 400px;">
                 <form method="post" action="">
                     <?php wp_nonce_field('ip_block_manage_nonce'); ?>
                     
                     <h2>🚫 ブロックリスト (.block.env)</h2>
-                    <p class="description">個別IPまたはサブネットマスク（例: <code>192.168.1.0/24</code>）を1行に1つずつ入力してください。</p>
+                    <p class="description"><code>#/ Clients can configure settings from here.</code> より下にIPやCIDRを記述してください。</p>
                     <textarea name="block_content" rows="6" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($block_data); ?></textarea>
 
                     <h2>⚪ ホワイトリスト (.white.env)</h2>
-                    <p class="description">レートリミットやブロックを完全に免除する個別IPまたはサブネットマスクを1行に1つずつ入力してください。</p>
+                    <p class="description"><code>#/ Clients can configure settings from here.</code> より下にIPやCIDRを記述してください。</p>
                     <textarea name="white_content" rows="6" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($white_data); ?></textarea>
 
                     <h2>⏩ 例外パス (.exception.env)</h2>
-                    <p class="description">アクセス制限をスルーさせるURLパス（例: <code>/api/*</code>）を1行に1つずつ入力してください。</p>
                     <textarea name="exception_content" rows="6" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($exception_data); ?></textarea>
 
                     <p style="margin-top: 15px;">
@@ -362,11 +428,8 @@ function ip_block_settings_page_html() {
                 </form>
             </div>
 
-            <!-- リアルタイムアクセス状況・統計エリア -->
             <div style="flex: 1; min-width: 450px;">
                 <h2>📊 現在のアクセス状況・統計監視</h2>
-                <p class="description">直近でアクセスしてきたIPごとのリクエスト回数と、1秒あたりの平均アクセス件数です。</p>
-                
                 <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
                     <thead>
                         <tr>
@@ -378,7 +441,7 @@ function ip_block_settings_page_html() {
                     </thead>
                     <tbody>
                         <?php if (empty($active_accesses)): ?>
-                            <tr><td colspan="4">現在記録されているアクティブなアクセスはありません。</td></tr>
+                            <tr><td colspan="4">現在記録されている外部のアクティブなアクセスはありません。</td></tr>
                         <?php else: ?>
                             <?php foreach ($active_accesses as $acc): ?>
                                 <tr>
