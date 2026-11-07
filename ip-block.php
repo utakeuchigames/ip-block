@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.2.1
+ * Version:     1.2.2
  * Author:      utakeuchigames
  * Author URI:  https://github.com/utakeuchigames
  * License:     GPL2
@@ -66,7 +66,7 @@ function get_server_meip() {
 }
 
 /**
- * 設定ファイルから「#/ Clients can configure settings from here.」より下の有効なルールだけを抽出する関数
+ * 設定ファイルから有効なルールだけを抽出する関数
  */
 function parse_env_file_rules($filepath) {
     if (!file_exists($filepath)) return [];
@@ -254,46 +254,46 @@ add_action('init', function() {
         }
     }
 
-    // === レートリミット処理 ===
     $currentTime = microtime(true);
+    $currentUri = $_SERVER['REQUEST_URI'];
+
+    // --- A. レートリミット処理 (.access.env) ---
+    // 1秒以内のアクセスをチェックし、古いものは捨てる
     $limitCount = 5;       
     $timeWindow = 1.0;     
-    $envFile = URL_ROOT . '.access.env';
+    $accessFile = URL_ROOT . '.access.env';
 
-    if (!file_exists($envFile)) {
-        file_put_contents($envFile, "");
+    if (!file_exists($accessFile)) {
+        file_put_contents($accessFile, "");
     }
 
-    $fp = fopen($envFile, 'r+');
-    if (!flock($fp, LOCK_EX)) {
-        exit("Server busy.");
-    }
+    $fp = fopen($accessFile, 'r+');
+    if (flock($fp, LOCK_EX)) {
+        $clientData = null;
+        $otherData = [];
 
-    $clientData = null;
-    $otherData = [];
-
-    while (($line = fgets($fp)) !== false) {
-        $line = trim($line);
-        if ($line === '') continue;
-        
-        $parts = explode(' ', $line, 4);
-        if (count($parts) < 4) continue;
-        
-        list($ip, $timestamp, $count, $lastfile) = $parts;
-        $timestamp = (float)$timestamp;
-        $count = (int)$count;
-        
-        if ($ip === $clientIp) {
-            $clientData = ['timestamp' => $timestamp, 'count' => $count, 'lastfile' => $lastfile];
-        } else {
-            if (($currentTime - $timestamp) < 60.0) {
-                $otherData[] = "{$ip} {$timestamp} {$count} {$lastfile}";
+        while (($line = fgets($fp)) !== false) {
+            $line = trim($line);
+            if ($line === '') continue;
+            
+            $parts = explode(' ', $line, 3);
+            if (count($parts) < 3) continue;
+            
+            list($ip, $timestamp, $count) = $parts;
+            $timestamp = (float)$timestamp;
+            $count = (int)$count;
+            
+            // 1秒経ったやつは消す（保持しない）
+            if (($currentTime - $timestamp) < $timeWindow) {
+                if ($ip === $clientIp) {
+                    $clientData = ['timestamp' => $timestamp, 'count' => $count];
+                } else {
+                    $otherData[] = "{$ip} {$timestamp} {$count}";
+                }
             }
         }
-    }
 
-    if ($clientData !== null) {
-        if (($currentTime - $clientData['timestamp']) < $timeWindow) {
+        if ($clientData !== null) {
             if ($clientData['count'] >= $limitCount) {
                 flock($fp, LOCK_UN);
                 fclose($fp);
@@ -306,27 +306,68 @@ add_action('init', function() {
             $newCount = 1;
             $newTimestamp = $currentTime;
         }
-    } else {
-        $newCount = 1;
-        $newTimestamp = $currentTime;
+
+        $otherData[] = "{$clientIp} {$newTimestamp} {$newCount}";
+
+        ftruncate($fp, 0);
+        rewind($fp);
+        fwrite($fp, implode("\n", $otherData) . "\n");
+        flock($fp, LOCK_UN);
+        fclose($fp);
     }
-    
-    $lastfile = $_SERVER['REQUEST_URI'];
-    $otherData[] = "{$clientIp} {$newTimestamp} {$newCount} {$lastfile}";
 
-    ftruncate($fp, 0);
-    rewind($fp);
-    fwrite($fp, implode("\n", $otherData) . "\n");
+    // --- B. 3ヶ月間のアクセス履歴・統計保存 (.history.env) ---
+    $historyFile = URL_ROOT . '.history.env';
+    if (!file_exists($historyFile)) {
+        file_put_contents($historyFile, "");
+    }
 
-    flock($fp, LOCK_UN);
-    fclose($fp);
+    $fp_h = fopen($historyFile, 'r+');
+    if (flock($fp_h, LOCK_EX)) {
+        $historyData = [];
+        $foundClient = false;
+        $threeMonthsAgo = $currentTime - (90 * 24 * 60 * 60);
+
+        while (($line = fgets($fp_h)) !== false) {
+            $line = trim($line);
+            if ($line === '') continue;
+            
+            $parts = explode(' ', $line, 4);
+            if (count($parts) < 4) continue;
+            
+            list($ip, $timestamp, $count, $lastfile) = $parts;
+            $timestamp = (float)$timestamp;
+            $count = (int)$count;
+
+            // 3ヶ月（90日）以内のデータだけ残す
+            if ($timestamp >= $threeMonthsAgo) {
+                if ($ip === $clientIp) {
+                    $count++;
+                    $timestamp = $currentTime;
+                    $lastfile = $currentUri;
+                    ['foundClient' => $foundClient] = ['foundClient' => true]; // 簡易フラグ更新
+                    $foundClient = true;
+                }
+                $historyData[] = "{$ip} {$timestamp} {$count} {$lastfile}";
+            }
+        }
+
+        if (!$foundClient) {
+            $historyData[] = "{$clientIp} {$currentTime} 1 {$currentUri}";
+        }
+
+        ftruncate($fp_h, 0);
+        rewind($fp_h);
+        fwrite($fp_h, implode("\n", $historyData) . "\n");
+        flock($fp_h, LOCK_UN);
+        fclose($fp_h);
+    }
     
     $accesscheck = true;
 });
 
 // 3. WordPress管理画面の設定メニューおよびサブメニュー追加
 add_action('admin_menu', function() {
-    // 親メニュー（デフォルトはアクセス監視画面）
     add_menu_page(
         'IP Block 管理',
         'IP Block',
@@ -337,7 +378,6 @@ add_action('admin_menu', function() {
         80
     );
 
-    // サブメニュー: アクセス監視
     add_submenu_page(
         'ip-block-manage',
         'アクセス監視',
@@ -347,7 +387,6 @@ add_action('admin_menu', function() {
         'ip_block_dashboard_page_html'
     );
 
-    // サブメニュー: ブロックリスト
     add_submenu_page(
         'ip-block-manage',
         'ブロックリスト',
@@ -357,7 +396,6 @@ add_action('admin_menu', function() {
         'ip_block_blacklist_page_html'
     );
 
-    // サブメニュー: ホワイトリスト
     add_submenu_page(
         'ip-block-manage',
         'ホワイトリスト',
@@ -367,7 +405,6 @@ add_action('admin_menu', function() {
         'ip_block_whitelist_page_html'
     );
 
-    // サブメニュー: 例外パス
     add_submenu_page(
         'ip-block-manage',
         '例外パス',
@@ -380,38 +417,29 @@ add_action('admin_menu', function() {
 
 // --- 各サブメニューのページ描画関数 ---
 
-// 1. アクセス監視ダッシュボード
+// 1. アクセス監視ダッシュボード（.history.envベース）
 function ip_block_dashboard_page_html() {
     if (!current_user_can('manage_options')) return;
 
-    $accessFile = URL_ROOT . '.access.env';
+    $historyFile = URL_ROOT . '.history.env';
     $current_meip = get_server_meip();
 
     $active_accesses = [];
-    if (file_exists($accessFile)) {
-        $lines = file($accessFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        $now = microtime(true);
+    if (file_exists($historyFile)) {
+        $lines = file($historyFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
             $parts = explode(' ', trim($line), 4);
             if (count($parts) >= 4) {
                 list($ip, $timestamp, $count, $lastfile) = $parts;
                 
                 if ($ip === $current_meip) {
-                    continue; // サーバー自身のアクセスは隠す
+                    continue; 
                 }
-
-                $timestamp = (float)$timestamp;
-                $count = (int)$count;
-                
-                $elapsed = $now - $timestamp;
-                if ($elapsed < 0) $elapsed = 0.001;
 
                 $active_accesses[] = [
                     'ip' => $ip,
-                    'timestamp' => $timestamp,
-                    'count' => $count,
-                    'elapsed' => $elapsed,
-                    'avg_rate' => $count / max(($now - ($timestamp - $elapsed)), 1.0),
+                    'timestamp' => (float)$timestamp,
+                    'count' => (int)$count,
                     'lastfile' => $lastfile
                 ];
             }
@@ -419,28 +447,28 @@ function ip_block_dashboard_page_html() {
     }
     ?>
     <div class="wrap">
-        <h1>アクセス状況・統計監視</h1>
+        <h1>アクセス状況・統計監視 (過去3ヶ月)</h1>
         <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html($current_meip); ?></code></p>
         
-        <h2>📊 現在のアクティブなアクセス</h2>
+        <h2>📊 記録されているアクセス履歴</h2>
         <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
             <thead>
                 <tr>
                     <th>IPアドレス</th>
-                    <th>アクセス回数</th>
-                    <th>1秒平均件数</th>
+                    <th>総アクセス回数</th>
+                    <th>最終アクセス日時</th>
                     <th>直近アクセス先</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($active_accesses)): ?>
-                    <tr><td colspan="4">現在記録されている外部のアクティブなアクセスはありません。</td></tr>
+                    <tr><td colspan="4">現在記録されている外部のアクセスはありません。</td></tr>
                 <?php else: ?>
                     <?php foreach ($active_accesses as $acc): ?>
                         <tr>
                             <td><code><?php echo esc_html($acc['ip']); ?></code></td>
                             <td><?php echo (int)$acc['count']; ?> 回</td>
-                            <td><?php echo number_format($acc['count'] / max(($acc['elapsed']), 0.1), 2); ?> 回/秒</td>
+                            <td><?php echo esc_html(date('Y-m-d H:i:s', (int)$acc['timestamp'])); ?></td>
                             <td><small><?php echo esc_html($acc['lastfile']); ?></small></td>
                         </tr>
                     <?php endforeach; ?>
