@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.2.3
+ * Version:     1.2.4
  * Author:      utakeuchigames
  * Author URI:  https://github.com/utakeuchigames
  * License:     GPL2
@@ -17,6 +17,10 @@ if (!defined('ABSPATH')) {
 if (!defined('URL_ROOT')) {
     define('URL_ROOT', plugin_dir_path(__FILE__));
 }
+
+$server_ip = gethostbyname($_SERVER['SERVER_NAME'] ?? 'localhost');
+// サーバー自身のIPを固定で定義
+define('IP_BLOCK_SERVER_MEIP', $server_ip);
 
 // プラグインをアプデしてもデータが消えないよう、アップロードフォルダ内に専用のデータ保存ディレクトリを定義
 $upload_dir = wp_upload_dir();
@@ -46,32 +50,6 @@ if (file_exists(__DIR__ . '/plugin-update-checker/plugin-update-checker.php')) {
         );
         $myUpdateChecker->setBranch('main');
     }
-}
-
-/**
- * サーバー自身のIP（meip）をキャッシュ付きで取得
- */
-function get_server_meip() {
-    $cached_ip = get_transient('ip_block_server_meip');
-    if ($cached_ip !== false) {
-        return $cached_ip;
-    }
-
-    $url = rest_url() ? home_url('/wp-content/plugins/ip-block/ip-get.php') : ('http://' . ($_SERVER['SERVER_NAME'] ?? 'localhost') . '/wp-content/plugins/ip-block/ip-get.php');
-    
-    $response = wp_remote_get($url, ['timeout' => 2]);
-    if (!is_wp_error($response)) {
-        $body = wp_remote_retrieve_body($response);
-        $data = json_decode($body, true);
-        if (isset($data['meip']) && !empty($data['meip'])) {
-            $meip = $data['meip'];
-            set_transient('ip_block_server_meip', $meip, HOUR_IN_SECONDS);
-            return $meip;
-        }
-    }
-
-    $fallback_ip = $_SERVER['SERVER_ADDR'] ?? gethostbyname(gethostname());
-    return $fallback_ip;
 }
 
 /**
@@ -138,8 +116,7 @@ function ip_in_cidr($ip, $range) {
  * ホワイトリストチェック
  */
 function check_white_list($ip) {
-    $meip = get_server_meip();
-    if ($ip === $meip) {
+    if ($ip === IP_BLOCK_SERVER_MEIP) {
         return true;
     }
 
@@ -173,8 +150,7 @@ function check_block_list($ip) {
  * ブロックリストへIPを追加
  */
 function addBlockedIp($ip, $file) {
-    $meip = get_server_meip();
-    if ($ip === $meip) {
+    if ($ip === IP_BLOCK_SERVER_MEIP) {
         return;
     }
 
@@ -424,7 +400,6 @@ function ip_block_dashboard_page_html() {
     if (!current_user_can('manage_options')) return;
 
     $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
-    $current_meip = get_server_meip();
 
     $active_accesses = [];
     if (file_exists($historyFile)) {
@@ -434,7 +409,7 @@ function ip_block_dashboard_page_html() {
             if (count($parts) >= 4) {
                 list($ip, $timestamp, $count, $lastfile) = $parts;
                 
-                if ($ip === $current_meip) {
+                if ($ip === IP_BLOCK_SERVER_MEIP) {
                     continue; 
                 }
 
@@ -450,7 +425,7 @@ function ip_block_dashboard_page_html() {
     ?>
     <div class="wrap">
         <h1>アクセス状況・統計監視 (全期間)</h1>
-        <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html($current_meip); ?></code></p>
+        <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html(IP_BLOCK_SERVER_MEIP); ?></code></p>
         
         <h2>📊 記録されているアクセス履歴</h2>
         <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
@@ -543,7 +518,7 @@ function ip_block_exceptions_page_html() {
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_exceptions_nonce');
         if (isset($_POST['exception_content'])) {
-            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])))   ;
+            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])));
             echo '<div class="updated"><p><strong>例外パス設定を保存しました！</strong></p></div>';
         }
     }
