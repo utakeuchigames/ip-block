@@ -155,12 +155,7 @@ function addBlockedIp($ip, $file) {
     }
 
     if (!filter_var($ip, FILTER_VALIDATE_IP)) {
-        header('HTTP/1.1 403 Forbidden');
-        if (file_exists(URL_ROOT . 'error/403.html')) {
-            require URL_ROOT . 'error/403.html';
-        } else {
-            echo "403 Forbidden";
-        }
+        http_response_code(403);
         exit;
     }
 
@@ -190,12 +185,7 @@ function addBlockedIp($ip, $file) {
         file_put_contents($file, $appendData, FILE_APPEND | LOCK_EX);
     }
 
-    header('HTTP/1.1 403 Forbidden');
-    if (file_exists(URL_ROOT . 'error/403.html')) {
-        require URL_ROOT . 'error/403.html';
-    } else {
-        echo "403 Forbidden";
-    }
+    http_response_code(403);
     exit;
 }
 
@@ -212,12 +202,7 @@ add_action('init', function() {
     }
 
     if (check_block_list($clientIp)) {
-        header('HTTP/1.1 403 Forbidden');
-        if (file_exists(URL_ROOT . 'error/403.html')) {
-            require URL_ROOT . 'error/403.html';
-        } else {
-            echo "403 Forbidden";
-        }
+        http_response_code(403);
         exit;
     }
 
