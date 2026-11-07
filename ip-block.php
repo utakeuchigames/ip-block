@@ -83,7 +83,7 @@ function parse_env_file_rules($filepath) {
     }
 
     $rules = [];
-    $start_reading = !$has_marker; // マーカーがなければ最初から全て読む
+    $start_reading = !$has_marker;
 
     foreach ($lines as $line) {
         $trimmed = trim($line);
@@ -94,7 +94,6 @@ function parse_env_file_rules($filepath) {
             continue;
         }
 
-        // 空行やコメント行はスキップ
         if ($trimmed === '' || $trimmed[0] === '#') {
             continue;
         }
@@ -325,49 +324,67 @@ add_action('init', function() {
     $accesscheck = true;
 });
 
-// 3. WordPress管理画面の設定メニュー追加
+// 3. WordPress管理画面の設定メニューおよびサブメニュー追加
 add_action('admin_menu', function() {
+    // 親メニュー（デフォルトはアクセス監視画面）
     add_menu_page(
         'IP Block 管理',
         'IP Block',
         'manage_options',
         'ip-block-manage',
-        'ip_block_settings_page_html',
+        'ip_block_dashboard_page_html',
         'dashicons-shield',
         80
     );
+
+    // サブメニュー: アクセス監視
+    add_submenu_page(
+        'ip-block-manage',
+        'アクセス監視',
+        'アクセス監視',
+        'manage_options',
+        'ip-block-manage',
+        'ip_block_dashboard_page_html'
+    );
+
+    // サブメニュー: ブロックリスト
+    add_submenu_page(
+        'ip-block-manage',
+        'ブロックリスト',
+        'ブロックリスト',
+        'manage_options',
+        'ip-block-blacklist',
+        'ip_block_blacklist_page_html'
+    );
+
+    // サブメニュー: ホワイトリスト
+    add_submenu_page(
+        'ip-block-manage',
+        'ホワイトリスト',
+        'ホワイトリスト',
+        'manage_options',
+        'ip-block-whitelist',
+        'ip_block_whitelist_page_html'
+    );
+
+    // サブメニュー: 例外パス
+    add_submenu_page(
+        'ip-block-manage',
+        '例外パス',
+        '例外パス',
+        'manage_options',
+        'ip-block-exceptions',
+        'ip_block_exceptions_page_html'
+    );
 });
 
-// 管理画面のHTML描画
-function ip_block_settings_page_html() {
-    if (!current_user_can('manage_options')) {
-        return;
-    }
+// --- 各サブメニューのページ描画関数 ---
 
-    $blockFile = URL_ROOT . '.block.env';
-    $exceptionFile = URL_ROOT . '.exception.env';
-    $whiteFile = URL_ROOT . '.white.env';
+// 1. アクセス監視ダッシュボード
+function ip_block_dashboard_page_html() {
+    if (!current_user_can('manage_options')) return;
+
     $accessFile = URL_ROOT . '.access.env';
-
-    if (isset($_POST['ip_block_submit'])) {
-        check_admin_referer('ip_block_manage_nonce');
-        
-        if (isset($_POST['block_content'])) {
-            file_put_contents($blockFile, sanitize_textarea_field(wp_unslash($_POST['block_content'])));
-        }
-        if (isset($_POST['exception_content'])) {
-            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])));
-        }
-        if (isset($_POST['white_content'])) {
-            file_put_contents($whiteFile, sanitize_textarea_field(wp_unslash($_POST['white_content'])));
-        }
-        echo '<div class="updated"><p><strong>設定を保存しました！</strong></p></div>';
-    }
-
-    $block_data = file_exists($blockFile) ? file_get_contents($blockFile) : '';
-    $exception_data = file_exists($exceptionFile) ? file_get_contents($exceptionFile) : '';
-    $white_data = file_exists($whiteFile) ? file_get_contents($whiteFile) : '';
-
     $current_meip = get_server_meip();
 
     $active_accesses = [];
@@ -379,9 +396,8 @@ function ip_block_settings_page_html() {
             if (count($parts) >= 4) {
                 list($ip, $timestamp, $count, $lastfile) = $parts;
                 
-                // サーバー自身（meip）のアクセスログは管理画面のリストに表示させない（隠す）
                 if ($ip === $current_meip) {
-                    continue;
+                    continue; // サーバー自身のアクセスは隠す
                 }
 
                 $timestamp = (float)$timestamp;
@@ -403,59 +419,115 @@ function ip_block_settings_page_html() {
     }
     ?>
     <div class="wrap">
-        <h1>IP Block & アクセス監視管理</h1>
+        <h1>アクセス状況・統計監視</h1>
         <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html($current_meip); ?></code></p>
         
-        <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-            <div style="flex: 1; min-width: 400px;">
-                <form method="post" action="">
-                    <?php wp_nonce_field('ip_block_manage_nonce'); ?>
-                    
-                    <h2>🚫 ブロックリスト (.block.env)</h2>
-                    <p class="description"><code>#/ Clients can configure settings from here.</code> より下にIPやCIDRを記述してください。</p>
-                    <textarea name="block_content" rows="6" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($block_data); ?></textarea>
-
-                    <h2>⚪ ホワイトリスト (.white.env)</h2>
-                    <p class="description"><code>#/ Clients can configure settings from here.</code> より下にIPやCIDRを記述してください。</p>
-                    <textarea name="white_content" rows="6" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($white_data); ?></textarea>
-
-                    <h2>⏩ 例外パス (.exception.env)</h2>
-                    <textarea name="exception_content" rows="6" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($exception_data); ?></textarea>
-
-                    <p style="margin-top: 15px;">
-                        <?php submit_button('設定を保存する', 'primary', 'ip_block_submit', false); ?>
-                    </p>
-                </form>
-            </div>
-
-            <div style="flex: 1; min-width: 450px;">
-                <h2>📊 現在のアクセス状況・統計監視</h2>
-                <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
-                    <thead>
+        <h2>📊 現在のアクティブなアクセス</h2>
+        <table class="wp-list-table widefat fixed striped" style="margin-top: 10px;">
+            <thead>
+                <tr>
+                    <th>IPアドレス</th>
+                    <th>アクセス回数</th>
+                    <th>1秒平均件数</th>
+                    <th>直近アクセス先</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($active_accesses)): ?>
+                    <tr><td colspan="4">現在記録されている外部のアクティブなアクセスはありません。</td></tr>
+                <?php else: ?>
+                    <?php foreach ($active_accesses as $acc): ?>
                         <tr>
-                            <th>IPアドレス</th>
-                            <th>アクセス回数</th>
-                            <th>1秒平均件数</th>
-                            <th>直近アクセス先</th>
+                            <td><code><?php echo esc_html($acc['ip']); ?></code></td>
+                            <td><?php echo (int)$acc['count']; ?> 回</td>
+                            <td><?php echo number_format($acc['count'] / max(($acc['elapsed']), 0.1), 2); ?> 回/秒</td>
+                            <td><small><?php echo esc_html($acc['lastfile']); ?></small></td>
                         </tr>
-                    </thead>
-                    <tbody>
-                        <?php if (empty($active_accesses)): ?>
-                            <tr><td colspan="4">現在記録されている外部のアクティブなアクセスはありません。</td></tr>
-                        <?php else: ?>
-                            <?php foreach ($active_accesses as $acc): ?>
-                                <tr>
-                                    <td><code><?php echo esc_html($acc['ip']); ?></code></td>
-                                    <td><?php echo (int)$acc['count']; ?> 回</td>
-                                    <td><?php echo number_format($acc['count'] / max(($acc['elapsed']), 0.1), 2); ?> 回/秒</td>
-                                    <td><small><?php echo esc_html($acc['lastfile']); ?></small></td>
-                                </tr>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php
+}
+
+// 2. ブロックリスト設定画面
+function ip_block_blacklist_page_html() {
+    if (!current_user_can('manage_options')) return;
+    $blockFile = URL_ROOT . '.block.env';
+
+    if (isset($_POST['ip_block_submit'])) {
+        check_admin_referer('ip_block_blacklist_nonce');
+        if (isset($_POST['block_content'])) {
+            file_put_contents($blockFile, sanitize_textarea_field(wp_unslash($_POST['block_content'])));
+            echo '<div class="updated"><p><strong>ブロックリストを保存しました！</strong></p></div>';
+        }
+    }
+    $block_data = file_exists($blockFile) ? file_get_contents($blockFile) : '';
+    ?>
+    <div class="wrap">
+        <h1>🚫 ブロックリスト設定 (.block.env)</h1>
+        <form method="post" action="">
+            <?php wp_nonce_field('ip_block_blacklist_nonce'); ?>
+            <textarea name="block_content" rows="12" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($block_data); ?></textarea>
+            <p style="margin-top: 15px;">
+                <?php submit_button('ブロックリストを保存する', 'primary', 'ip_block_submit', false); ?>
+            </p>
+        </form>
+    </div>
+    <?php
+}
+
+// 3. ホワイトリスト設定画面
+function ip_block_whitelist_page_html() {
+    if (!current_user_can('manage_options')) return;
+    $whiteFile = URL_ROOT . '.white.env';
+
+    if (isset($_POST['ip_block_submit'])) {
+        check_admin_referer('ip_block_whitelist_nonce');
+        if (isset($_POST['white_content'])) {
+            file_put_contents($whiteFile, sanitize_textarea_field(wp_unslash($_POST['white_content'])));
+            echo '<div class="updated"><p><strong>ホワイトリストを保存しました！</strong></p></div>';
+        }
+    }
+    $white_data = file_exists($whiteFile) ? file_get_contents($whiteFile) : '';
+    ?>
+    <div class="wrap">
+        <h1>⚪ ホワイトリスト設定 (.white.env)</h1>
+        <form method="post" action="">
+            <?php wp_nonce_field('ip_block_whitelist_nonce'); ?>
+            <textarea name="white_content" rows="12" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($white_data); ?></textarea>
+            <p style="margin-top: 15px;">
+                <?php submit_button('ホワイトリストを保存する', 'primary', 'ip_block_submit', false); ?>
+            </p>
+        </form>
+    </div>
+    <?php
+}
+
+// 4. 例外パス設定画面
+function ip_block_exceptions_page_html() {
+    if (!current_user_can('manage_options')) return;
+    $exceptionFile = URL_ROOT . '.exception.env';
+
+    if (isset($_POST['ip_block_submit'])) {
+        check_admin_referer('ip_block_exceptions_nonce');
+        if (isset($_POST['exception_content'])) {
+            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])));
+            echo '<div class="updated"><p><strong>例外パス設定を保存しました！</strong></p></div>';
+        }
+    }
+    $exception_data = file_exists($exceptionFile) ? file_get_contents($exceptionFile) : '';
+    ?>
+    <div class="wrap">
+        <h1>⏩ 例外パス設定 (.exception.env)</h1>
+        <form method="post" action="">
+            <?php wp_nonce_field('ip_block_exceptions_nonce'); ?>
+            <textarea name="exception_content" rows="12" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($exception_data); ?></textarea>
+            <p style="margin-top: 15px;">
+                <?php submit_button('例外パスを保存する', 'primary', 'ip_block_submit', false); ?>
+            </p>
+        </form>
     </div>
     <?php
 }
