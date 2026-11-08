@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.2.8
+ * Version:     1.0.0
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
