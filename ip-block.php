@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.2.5
+ * Version:     1.2.6
  * Author:      utakeuchigames
  * Author URI:  https://github.com/utakeuchigames
  * License:     GPL2
@@ -437,6 +437,7 @@ function ip_block_dashboard_page_html() {
                 <?php endif; ?>
             </tbody>
         </table>
+        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
@@ -464,6 +465,7 @@ function ip_block_blacklist_page_html() {
                 <?php submit_button('ブロックリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
+        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
@@ -491,6 +493,7 @@ function ip_block_whitelist_page_html() {
                 <?php submit_button('ホワイトリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
+        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
@@ -518,6 +521,7 @@ function ip_block_exceptions_page_html() {
                 <?php submit_button('例外パスを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
+        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
