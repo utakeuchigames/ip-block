@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.2.6
+ * Version:     1.2.7
  * Author:      utakeuchigames
  * Author URI:  https://github.com/utakeuchigames
  * License:     GPL2
@@ -19,14 +19,11 @@ if (!defined('URL_ROOT')) {
 }
 
 $server_ip = gethostbyname($_SERVER['SERVER_NAME'] ?? 'localhost');
-// サーバー自身のIPを固定で定義
 define('IP_BLOCK_SERVER_MEIP', $server_ip);
 
-// プラグインをアプデしてもデータが消えないよう、アップロードフォルダ内に専用のデータ保存ディレクトリを定義
 $upload_dir = wp_upload_dir();
 define('IP_BLOCK_DATA_DIR', $upload_dir['basedir'] . '/ip-block-data/');
 
-// データ保存用ディレクトリがなければ自動作成する
 if (!file_exists(IP_BLOCK_DATA_DIR)) {
     wp_mkdir_p(IP_BLOCK_DATA_DIR);
 }
@@ -87,6 +84,36 @@ function parse_env_file_rules($filepath) {
         $rules[] = $trimmed;
     }
     return $rules;
+}
+
+/**
+ * 詳細設定（レートリミット設定等）を取得する関数
+ */
+function ip_block_get_config() {
+    $configFile = IP_BLOCK_DATA_DIR . '.config.env';
+    $config = [
+        'limit_count' => 5,
+        'time_window' => 1.0,
+    ];
+
+    if (file_exists($configFile)) {
+        $lines = file($configFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') continue;
+            if (strpos($line, '=') !== false) {
+                list($key, $val) = explode('=', $line, 2);
+                $key = strtolower(trim($key));
+                $val = trim($val);
+                if ($key === 'limit_count') {
+                    $config['limit_count'] = max(1, (int)$val);
+                } elseif ($key === 'time_window') {
+                    $config['time_window'] = max(0.1, (float)$val);
+                }
+            }
+        }
+    }
+    return $config;
 }
 
 /**
@@ -227,9 +254,10 @@ add_action('init', function() {
     $currentTime = microtime(true);
     $currentUri = $_SERVER['REQUEST_URI'];
 
-    // --- A. レートリミット処理 (.access.env) ---
-    $limitCount = 5;       
-    $timeWindow = 1.0;     
+    // 詳細設定から制限値を取得
+    $config = ip_block_get_config();
+    $limitCount = $config['limit_count'];      
+    $timeWindow = $config['time_window'];      
     $accessFile = IP_BLOCK_DATA_DIR . '.access.env';
 
     if (!file_exists($accessFile)) {
@@ -352,6 +380,15 @@ add_action('admin_menu', function() {
 
     add_submenu_page(
         'ip-block-manage',
+        '詳細設定',
+        '詳細設定',
+        'manage_options',
+        'ip-block-settings',
+        'ip_block_settings_page_html'
+    );
+
+    add_submenu_page(
+        'ip-block-manage',
         'ブロックリスト',
         'ブロックリスト',
         'manage_options',
@@ -385,6 +422,7 @@ function ip_block_dashboard_page_html() {
     if (!current_user_can('manage_options')) return;
 
     $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
+    $config = ip_block_get_config();
 
     $active_accesses = [];
     if (file_exists($historyFile)) {
@@ -409,7 +447,8 @@ function ip_block_dashboard_page_html() {
     }
     ?>
     <div class="wrap">
-        <h1>アクセス状況・統計監視 (全期間)</h1>
+        <h1>🛡️ IP Block ダッシュボード (アクセス監視)</h1>
+        <p>現在のレートリミット設定： <strong><?php echo (int)$config['time_window']; ?>秒</strong> の間に <strong><?php echo (int)$config['limit_count']; ?>回</strong> 以上のアクセスで自動ブロック</p>
         <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html(IP_BLOCK_SERVER_MEIP); ?></code></p>
         
         <h2>📊 記録されているアクセス履歴</h2>
@@ -437,12 +476,55 @@ function ip_block_dashboard_page_html() {
                 <?php endif; ?>
             </tbody>
         </table>
-        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
+        <p style="margin-top: 20px;"><small>Wordfenceなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
 
-// 2. ブロックリスト設定画面
+// 2. 詳細設定画面 (レートリミット等)
+function ip_block_settings_page_html() {
+    if (!current_user_can('manage_options')) return;
+    $configFile = IP_BLOCK_DATA_DIR . '.config.env';
+
+    if (isset($_POST['ip_block_submit'])) {
+        check_admin_referer('ip_block_settings_nonce');
+        $limit_count = max(1, (int)$_POST['limit_count']);
+        $time_window = max(0.1, (float)$_POST['time_window']);
+
+        $newConfigData = "LIMIT_COUNT={$limit_count}\nTIME_WINDOW={$time_window}\n";
+        file_put_contents($configFile, $newConfigData, LOCK_EX);
+        echo '<div class="updated"><p><strong>詳細設定を保存しました！</strong></p></div>';
+    }
+
+    $config = ip_block_get_config();
+    ?>
+    <div class="wrap">
+        <h1>⚙️ 詳細設定 (レートリミット調整)</h1>
+        <form method="post" action="">
+            <?php wp_nonce_field('ip_block_settings_nonce'); ?>
+            <table class="form-table">
+                <tr>
+                    <th scope="row"><label for="limit_count">制限回数 (回)</label></th>
+                    <td>
+                        <input name="limit_count" type="number" id="limit_count" value="<?php echo esc_attr($config['limit_count']); ?>" min="1" max="100" class="small-text" required>
+                        <p class="description">指定した制限時間内に、この回数を超えてアクセスするとブロックリストに自動追加されます。</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="time_window">制限時間 (秒)</label></th>
+                    <td>
+                        <input name="time_window" type="number" step="0.1" id="time_window" value="<?php echo esc_attr($config['time_window']); ?>" min="0.1" max="60" class="small-text" required>
+                        <p class="description">この秒数内のアクセスをカウントします（例: 1.0秒なら1秒間に何回アクセスされたか）。</p>
+                    </td>
+                </tr>
+            </table>
+            <?php submit_button('設定を保存する', 'primary', 'ip_block_submit', true); ?>
+        </form>
+    </div>
+    <?php
+}
+
+// 3. ブロックリスト設定画面
 function ip_block_blacklist_page_html() {
     if (!current_user_can('manage_options')) return;
     $blockFile = IP_BLOCK_DATA_DIR . '.block.env';
@@ -465,12 +547,11 @@ function ip_block_blacklist_page_html() {
                 <?php submit_button('ブロックリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
-        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
 
-// 3. ホワイトリスト設定画面
+// 4. ホワイトリスト設定画面
 function ip_block_whitelist_page_html() {
     if (!current_user_can('manage_options')) return;
     $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
@@ -493,12 +574,11 @@ function ip_block_whitelist_page_html() {
                 <?php submit_button('ホワイトリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
-        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
 
-// 4. 例外パス設定画面
+// 5. 例外パス設定画面
 function ip_block_exceptions_page_html() {
     if (!current_user_can('manage_options')) return;
     $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.env';
@@ -521,7 +601,6 @@ function ip_block_exceptions_page_html() {
                 <?php submit_button('例外パスを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
-        <p>wordfenseなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</p>
     </div>
     <?php
 }
