@@ -478,7 +478,7 @@ function ip_block_dashboard_page_html() {
                 <?php endif; ?>
             </tbody>
         </table>
-        <p style="margin-top: 20px;"><small>Wordfenceなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
+        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -522,6 +522,7 @@ function ip_block_settings_page_html() {
             </table>
             <?php submit_button('設定を保存する', 'primary', 'ip_block_submit', true); ?>
         </form>
+        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -549,6 +550,7 @@ function ip_block_blacklist_page_html() {
                 <?php submit_button('ブロックリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
+        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -576,6 +578,7 @@ function ip_block_whitelist_page_html() {
                 <?php submit_button('ホワイトリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
+        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -603,6 +606,7 @@ function ip_block_exceptions_page_html() {
                 <?php submit_button('例外パスを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
+        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
