@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.0.0
+ * Version:     1.0.1
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
@@ -161,6 +161,20 @@ function check_white_list($ip) {
 }
 
 /**
+ * 厳密にホワイトリストに含まれているか（ボタン表示用）
+ */
+function ip_block_is_in_whitelist($ip) {
+    $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
+    $rules = parse_env_file_rules($whiteFile);
+    foreach ($rules as $range) {
+        if (ip_in_cidr($ip, $range)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * ブロックリストチェック
  */
 function check_block_list($ip) {
@@ -176,19 +190,12 @@ function check_block_list($ip) {
 }
 
 /**
- * ブロックリストへIPを追加
+ * ファイルにIPルールを安全に追記する共通関数
  */
-function addBlockedIp($ip, $file) {
-    if ($ip === IP_BLOCK_SERVER_MEIP) {
-        return;
-    }
+function ip_block_append_to_file($filepath, $ip) {
+    if ($ip === IP_BLOCK_SERVER_MEIP) return;
 
-    if (!filter_var($ip, FILTER_VALIDATE_IP)) {
-        http_response_code(403);
-        exit;
-    }
-
-    $currentIps = file_exists($file) ? file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
+    $currentIps = file_exists($filepath) ? file($filepath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
     $currentIps = array_map('trim', $currentIps);
 
     $exists = false;
@@ -201,8 +208,8 @@ function addBlockedIp($ip, $file) {
 
     if (!$exists) {
         $appendData = $ip;
-        if (file_exists($file) && filesize($file) > 0) {
-            $fp = fopen($file, 'r');
+        if (file_exists($filepath) && filesize($filepath) > 0) {
+            $fp = fopen($filepath, 'r');
             fseek($fp, -1, SEEK_END);
             $lastChar = fgetc($fp);
             fclose($fp);
@@ -211,9 +218,69 @@ function addBlockedIp($ip, $file) {
                 $appendData = PHP_EOL . $ip;
             }
         }
-        file_put_contents($file, $appendData, FILE_APPEND | LOCK_EX);
+        file_put_contents($filepath, $appendData, FILE_APPEND | LOCK_EX);
+    }
+}
+
+/**
+ * ファイルから特定のIP/ルールを削除する関数
+ */
+function ip_block_remove_from_file($filepath, $ip) {
+    if (!file_exists($filepath)) return;
+
+    $lines = file($filepath, FILE_IGNORE_NEW_LINES);
+    if ($lines === false) return;
+
+    $new_lines = [];
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+        if ($trimmed === '' || $trimmed[0] === '#' || strpos($trimmed, '#/') === 0) {
+            $new_lines[] = $line;
+            continue;
+        }
+        if ($trimmed === $ip || ip_in_cidr($ip, $trimmed)) {
+            continue;
+        }
+        $new_lines[] = $line;
     }
 
+    file_put_contents($filepath, implode("\n", $new_lines) . "\n", LOCK_EX);
+}
+
+/**
+ * アクセス履歴（.history.env）から特定のIPの行を削除する関数
+ */
+function ip_block_remove_history_ip($ip_to_remove) {
+    $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
+    if (!file_exists($historyFile)) return;
+
+    $fp = fopen($historyFile, 'r+');
+    if (flock($fp, LOCK_EX)) {
+        $lines = [];
+        while (($line = fgets($fp)) !== false) {
+            $trimmed = trim($line);
+            if ($trimmed === '') continue;
+            $parts = explode(' ', $trimmed, 4);
+            if (count($parts) >= 1 && $parts[0] !== $ip_to_remove) {
+                $lines[] = $trimmed;
+            }
+        }
+        ftruncate($fp, 0);
+        rewind($fp);
+        if (!empty($lines)) {
+            fwrite($fp, implode("\n", $lines) . "\n");
+        }
+        flock($fp, LOCK_UN);
+        fclose($fp);
+    }
+}
+
+/**
+ * ブロックリストへIPを追加して即終了する関数
+ */
+function addBlockedIp($ip, $file) {
+    ip_block_append_to_file($file, $ip);
+    ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.env', $ip);
     http_response_code(403);
     exit;
 }
@@ -227,7 +294,7 @@ add_action('init', function() {
 
     if (check_white_list($clientIp)) {
         $accesscheck = true;
-        return;
+        // ホワイトリストに入っている場合もアクセス履歴（.history.env）は記録する
     }
 
     if (check_block_list($clientIp)) {
@@ -256,7 +323,6 @@ add_action('init', function() {
     $currentTime = microtime(true);
     $currentUri = $_SERVER['REQUEST_URI'];
 
-    // 詳細設定から制限値を取得
     $config = ip_block_get_config();
     $limitCount = $config['limit_count'];      
     $timeWindow = $config['time_window'];      
@@ -356,6 +422,9 @@ add_action('init', function() {
         fclose($fp_h);
     }
     
+    if (check_white_list($clientIp)) {
+        return;
+    }
     $accesscheck = true;
 });
 
@@ -423,6 +492,28 @@ add_action('admin_menu', function() {
 function ip_block_dashboard_page_html() {
     if (!current_user_can('manage_options')) return;
 
+    // テーブル上のボタン処理
+    if (isset($_POST['ip_action']) && isset($_POST['target_ip'])) {
+        check_admin_referer('ip_block_action_nonce_action', 'ip_block_action_nonce');
+        $target_ip = sanitize_text_field($_POST['target_ip']);
+        $action_type = sanitize_text_field($_POST['ip_action']);
+
+        if (filter_var($target_ip, FILTER_VALIDATE_IP)) {
+            if ($action_type === 'block') {
+                ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.block.env', $target_ip);
+                ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.env', $target_ip);
+                ip_block_remove_history_ip($target_ip);
+                echo '<div class="updated"><p><strong>IP <code>' . esc_html($target_ip) . '</code> をブロックリストに追加し、ホワイトリストから除外してアクセス履歴から削除しました。</strong></p></div>';
+            } elseif ($action_type === 'whitelist_add') {
+                ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.white.env', $target_ip);
+                echo '<div class="updated"><p><strong>IP <code>' . esc_html($target_ip) . '</code> をホワイトリストに追加しました（アクセス履歴は保持されます）。</strong></p></div>';
+            } elseif ($action_type === 'whitelist_remove') {
+                ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.env', $target_ip);
+                echo '<div class="updated"><p><strong>IP <code>' . esc_html($target_ip) . '</code> をホワイトリストから外しました。</strong></p></div>';
+            }
+        }
+    }
+
     $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
     $config = ip_block_get_config();
 
@@ -461,24 +552,46 @@ function ip_block_dashboard_page_html() {
                     <th>総アクセス回数</th>
                     <th>最終アクセス日時</th>
                     <th>直近アクセス先</th>
+                    <th style="width: 260px;">アクション</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($active_accesses)): ?>
-                    <tr><td colspan="4">現在記録されている外部のアクセスはありません。</td></tr>
+                    <tr><td colspan="5">現在記録されている外部のアクセスはありません。</td></tr>
                 <?php else: ?>
                     <?php foreach ($active_accesses as $acc): ?>
+                        <?php $is_whitelisted = ip_block_is_in_whitelist($acc['ip']); ?>
                         <tr>
                             <td><code><?php echo esc_html($acc['ip']); ?></code></td>
                             <td><?php echo (int)$acc['count']; ?> 回</td>
                             <td><?php echo esc_html(date('Y-m-d H:i:s', (int)$acc['timestamp'])); ?></td>
                             <td><small><?php echo esc_html($acc['lastfile']); ?></small></td>
+                            <td>
+                                <form method="post" action="" style="display:inline;">
+                                    <?php wp_nonce_field('ip_block_action_nonce_action', 'ip_block_action_nonce'); ?>
+                                    <input type="hidden" name="target_ip" value="<?php echo esc_attr($acc['ip']); ?>">
+                                    <button type="submit" name="ip_action" value="block" class="button button-small button-link-delete" onclick="return confirm('本当にこのIPをブロックしますか？');">ブロック</button>
+                                </form>
+                                <?php if ($is_whitelisted): ?>
+                                    <form method="post" action="" style="display:inline; margin-left: 5px;">
+                                        <?php wp_nonce_field('ip_block_action_nonce_action', 'ip_block_action_nonce'); ?>
+                                        <input type="hidden" name="target_ip" value="<?php echo esc_attr($acc['ip']); ?>">
+                                        <button type="submit" name="ip_action" value="whitelist_remove" class="button button-small button-primary">ホワイトリストに入れてあります</button>
+                                    </form>
+                                <?php else: ?>
+                                    <form method="post" action="" style="display:inline; margin-left: 5px;">
+                                        <?php wp_nonce_field('ip_block_action_nonce_action', 'ip_block_action_nonce'); ?>
+                                        <input type="hidden" name="target_ip" value="<?php echo esc_attr($acc['ip']); ?>">
+                                        <button type="submit" name="ip_action" value="whitelist_add" class="button button-small">ホワイトリスト</button>
+                                    </form>
+                                <?php endif; ?>
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
             </tbody>
         </table>
-        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
+        <p style="margin-top: 20px;"><small>Wordfenceなどのセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -522,7 +635,6 @@ function ip_block_settings_page_html() {
             </table>
             <?php submit_button('設定を保存する', 'primary', 'ip_block_submit', true); ?>
         </form>
-        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -550,7 +662,6 @@ function ip_block_blacklist_page_html() {
                 <?php submit_button('ブロックリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
-        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -578,7 +689,6 @@ function ip_block_whitelist_page_html() {
                 <?php submit_button('ホワイトリストを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
-        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
@@ -606,7 +716,6 @@ function ip_block_exceptions_page_html() {
                 <?php submit_button('例外パスを保存する', 'primary', 'ip_block_submit', false); ?>
             </p>
         </form>
-        <p style="margin-top: 20px;"><small>他のセキュリティプラグインと併用している場合、動作に支障をきたす事がございます。</small></p>
     </div>
     <?php
 }
