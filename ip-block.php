@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.0.4
+ * Version:     1.0.5
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
@@ -38,6 +38,7 @@ function ip_block_get_config() {
         'cloudflare_mode' => 0,
         'server_meip' => '',
         'login_limit_count' => 5,
+        'mu_plugin_mode' => 0,
     ];
 
     if (file_exists($configFile)) {
@@ -59,6 +60,8 @@ function ip_block_get_config() {
                     $config['server_meip'] = $val;
                 } elseif ($key === 'login_limit_count') {
                     $config['login_limit_count'] = max(1, (int)$val);
+                } elseif ($key === 'mu_plugin_mode') {
+                    $config['mu_plugin_mode'] = (int)$val;
                 }
             }
         }
@@ -77,6 +80,7 @@ function ip_block_save_config($config) {
     $content .= "CLOUDFLARE_MODE=" . (int)$config['cloudflare_mode'] . "\n";
     $content .= "SERVER_MEIP=" . sanitize_text_field($config['server_meip']) . "\n";
     $content .= "LOGIN_LIMIT_COUNT=" . (int)$config['login_limit_count'] . "\n";
+    $content .= "MU_PLUGIN_MODE=" . (int)$config['mu_plugin_mode'] . "\n";
     file_put_contents($configFile, $content, LOCK_EX);
 }
 
@@ -90,7 +94,12 @@ function ip_block_get_server_meip() {
         return $config['server_meip'];
     }
 
-    $my_ip_endpoint = plugins_url('ip-get.php', __FILE__);
+    $mu_dir = defined('WPMU_PLUGIN_DIR') ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins';
+    if (strpos(__FILE__, $mu_dir) === 0) {
+        $my_ip_endpoint = content_url('mu-plugins/ip-get.php');
+    } else {
+        $my_ip_endpoint = plugins_url('ip-get.php', __FILE__);
+    }
 
     $response = wp_remote_get($my_ip_endpoint, ['timeout' => 3, 'sslverify' => false]);
     $detected_ip = '';
@@ -745,7 +754,46 @@ function ip_block_settings_page_html() {
         $config['cloudflare_mode'] = isset($_POST['cloudflare_mode']) ? 1 : 0;
         $config['login_limit_count'] = max(1, (int)$_POST['login_limit_count']);
         
+        $new_mu_mode = isset($_POST['mu_plugin_mode']) ? 1 : 0;
+        $config['mu_plugin_mode'] = $new_mu_mode;
+        
         ip_block_save_config($config);
+
+        // mu-plugins へのコピー・削除の自動切り替え処理 & プラグイン名の(mu mode)付与書き換え
+        $mu_dir = defined('WPMU_PLUGIN_DIR') ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins';
+        if (!file_exists($mu_dir)) {
+            wp_mkdir_p($mu_dir);
+        }
+        $target_mu_file = $mu_dir . '/ip-block.php';
+        $target_mu_get = $mu_dir . '/ip-get.php';
+        $source_get = __DIR__ . '/ip-get.php';
+
+        if ($new_mu_mode === 1) {
+            // ファイルの中身を読み込んで Plugin Name を変更して mu-plugins に書き込む
+            $source_code = file_get_contents(__FILE__);
+            $modified_code = str_replace(
+                'Plugin Name: IP Block & Rate Limiter Manager',
+                'Plugin Name: IP Block & Rate Limiter Manager (mu mode)',
+                $source_code
+            );
+            file_put_contents($target_mu_file, $modified_code, LOCK_EX);
+
+            if (file_exists($source_get)) {
+                copy($source_get, $target_mu_get);
+            }
+            // 通常プラグインとして有効化されていたら自動的に停止する
+            if (is_plugin_active('ip-block/ip-block.php')) {
+                deactivate_plugins('ip-block/ip-block.php');
+            }
+        } else {
+            // 通常モードに戻すときは mu-plugins からファイルを削除
+            if (file_exists($target_mu_file)) {
+                @unlink($target_mu_file);
+            }
+            if (file_exists($target_mu_get)) {
+                @unlink($target_mu_get);
+            }
+        }
 
         if ($is_hidden_mode && isset($_POST['github_token'])) {
             $github_token = sanitize_text_field($_POST['github_token']);
@@ -793,6 +841,16 @@ function ip_block_settings_page_html() {
                             Cloudflare経由のアクセス元IP（<code>HTTP_CF_CONNECTING_IP</code>）を優先して取得する
                         </label>
                         <p class="description">Cloudflareを使用している環境で有効にしてください。</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">素早くブロック (mu-pluginsモード)</th>
+                    <td>
+                        <label for="mu_plugin_mode">
+                            <input name="mu_plugin_mode" type="checkbox" id="mu_plugin_mode" value="1" <?php checked($config['mu_plugin_mode'], 1); ?>>
+                            ONにすると自動的に <code>wp-content/mu-plugins/</code> に配置され、プラグイン名が <code>(mu mode)</code> 付きに変化して最速ブロックが有効になります
+                        </label>
+                        <p class="description">有効にするとWordfenceなどの検知よりも手前で門前払いが可能になります。</p>
                     </td>
                 </tr>
 
