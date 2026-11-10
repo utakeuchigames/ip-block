@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.0.3
+ * Version:     1.0.4
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
@@ -37,6 +37,7 @@ function ip_block_get_config() {
         'time_window' => 1.0,
         'cloudflare_mode' => 0,
         'server_meip' => '',
+        'login_limit_count' => 5,
     ];
 
     if (file_exists($configFile)) {
@@ -56,6 +57,8 @@ function ip_block_get_config() {
                     $config['cloudflare_mode'] = (int)$val;
                 } elseif ($key === 'server_meip') {
                     $config['server_meip'] = $val;
+                } elseif ($key === 'login_limit_count') {
+                    $config['login_limit_count'] = max(1, (int)$val);
                 }
             }
         }
@@ -73,6 +76,7 @@ function ip_block_save_config($config) {
     $content .= "TIME_WINDOW=" . (float)$config['time_window'] . "\n";
     $content .= "CLOUDFLARE_MODE=" . (int)$config['cloudflare_mode'] . "\n";
     $content .= "SERVER_MEIP=" . sanitize_text_field($config['server_meip']) . "\n";
+    $content .= "LOGIN_LIMIT_COUNT=" . (int)$config['login_limit_count'] . "\n";
     file_put_contents($configFile, $content, LOCK_EX);
 }
 
@@ -86,7 +90,6 @@ function ip_block_get_server_meip() {
         return $config['server_meip'];
     }
 
-    // プラグイン内にある ip-get.php のURLを自動生成して叩く
     $my_ip_endpoint = plugins_url('ip-get.php', __FILE__);
 
     $response = wp_remote_get($my_ip_endpoint, ['timeout' => 3, 'sslverify' => false]);
@@ -95,7 +98,6 @@ function ip_block_get_server_meip() {
     if (!is_wp_error($response)) {
         $body = trim(wp_remote_retrieve_body($response));
         
-        // JSONのパースを試みる（シングルクォート混じりや標準JSONに対応）
         $json_data = json_decode($body, true);
         if (!$json_data) {
             $fixed_body = str_replace("'", '"', $body);
@@ -109,7 +111,6 @@ function ip_block_get_server_meip() {
         }
     }
 
-    // 取得に失敗した場合のフォールバック
     if (empty($detected_ip)) {
         $detected_ip = $_SERVER['SERVER_ADDR'] ?? '127.0.0.1';
     }
@@ -200,6 +201,11 @@ function ip_in_cidr($ip, $range) {
         return false;
     }
     list($subnet, $bits) = explode('/', $range);
+    $bits = (int)$bits;
+    if ($bits < 0 || $bits > 32) {
+        return false;
+    }
+
     $ip = long2ip(ip2long($ip));
     $subnet = long2ip(ip2long($subnet));
     if ($ip === false || $subnet === false) {
@@ -207,7 +213,7 @@ function ip_in_cidr($ip, $range) {
     }
     $ip_long = ip2long($ip);
     $subnet_long = ip2long($subnet);
-    $mask = -1 << (32 - (int)$bits);
+    $mask = ($bits === 0) ? 0 : (~0 << (32 - $bits));
     $subnet_long &= $mask;
     return ($ip_long & $mask) === $subnet_long;
 }
@@ -261,20 +267,15 @@ function check_block_list($ip) {
 }
 
 /**
- * ファイルにIPルールを安全に追記する共通関数
+ * ファイルにIPルールを安全に追記する共通関数（末尾改行を確実に保証）
  */
 function ip_block_append_to_file($filepath, $ip) {
     if ($ip === IP_BLOCK_SERVER_MEIP) return;
 
-    if (!file_exists($filepath) || filesize($filepath) === 0) {
-        file_put_contents($filepath, "<?php exit; ?>\n" . $ip . "\n", LOCK_EX);
-        return;
-    }
-
-    $currentIps = parse_env_file_rules($filepath);
+    $rules = parse_env_file_rules($filepath);
 
     $exists = false;
-    foreach ($currentIps as $existing) {
+    foreach ($rules as $existing) {
         if (ip_in_cidr($ip, $existing)) {
             $exists = true;
             break;
@@ -282,7 +283,9 @@ function ip_block_append_to_file($filepath, $ip) {
     }
 
     if (!$exists) {
-        file_put_contents($filepath, $ip . "\n", FILE_APPEND | LOCK_EX);
+        $rules[] = $ip;
+        $content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+        file_put_contents($filepath, $content, LOCK_EX);
     }
 }
 
@@ -292,22 +295,17 @@ function ip_block_append_to_file($filepath, $ip) {
 function ip_block_remove_from_file($filepath, $ip) {
     if (!file_exists($filepath)) return;
 
-    $lines = file($filepath, FILE_IGNORE_NEW_LINES);
-    if ($lines === false) return;
-
-    $new_lines = ["<?php exit; ?>"];
-    foreach ($lines as $line) {
-        $trimmed = trim($line);
-        if ($trimmed === '' || $trimmed[0] === '#' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) {
-            continue;
-        }
+    $rules = parse_env_file_rules($filepath);
+    $new_rules = [];
+    foreach ($rules as $trimmed) {
         if ($trimmed === $ip || ip_in_cidr($ip, $trimmed)) {
             continue;
         }
-        $new_lines[] = $trimmed;
+        $new_rules[] = $trimmed;
     }
 
-    file_put_contents($filepath, implode("\n", $new_lines) . "\n", LOCK_EX);
+    $content = "<?php exit; ?>\n" . (empty($new_rules) ? "" : implode("\n", $new_rules) . "\n");
+    file_put_contents($filepath, $content, LOCK_EX);
 }
 
 /**
@@ -345,7 +343,7 @@ function addBlockedIp($ip, $file) {
     exit;
 }
 
-// 2. アクセス制限・監視の実行コア処理
+// 2. アクセス制限・監視およびログイン失敗検知の実行コア処理
 add_action('init', function() {
     global $accesscheck;
     if (!empty($accesscheck)) return;
@@ -474,7 +472,93 @@ add_action('init', function() {
     $accesscheck = true;
 });
 
-// 3. WordPress管理画面の設定メニューおよびサブメニュー追加
+// --- 3. ログイン失敗検知および成功時リセットのフック処理 ---
+add_action('wp_login_failed', function($username) {
+    $config = ip_block_get_config();
+    $loginLimitCount = $config['login_limit_count'];
+    $cloudflareMode = $config['cloudflare_mode'];
+
+    if ($cloudflareMode && !empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        $clientIp = $_SERVER['HTTP_CF_CONNECTING_IP'];
+    } else {
+        $clientIp = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    }
+
+    if (check_white_list($clientIp) || $clientIp === IP_BLOCK_SERVER_MEIP) {
+        return;
+    }
+
+    $failFile = IP_BLOCK_DATA_DIR . '.login-fails.php';
+    $currentTime = time();
+    $failsData = [];
+
+    if (file_exists($failFile)) {
+        $lines = file($failFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) continue;
+            $parts = explode(' ', $trimmed, 3);
+            if (count($parts) < 3) continue;
+            list($ip, $timestamp, $count) = $parts;
+            $failsData[$ip] = ['timestamp' => (int)$timestamp, 'count' => (int)$count];
+        }
+    }
+
+    if (isset($failsData[$clientIp])) {
+        $failsData[$clientIp]['count']++;
+        $failsData[$clientIp]['timestamp'] = $currentTime;
+    } else {
+        $failsData[$clientIp] = [
+            'timestamp' => $currentTime,
+            'count' => 1
+        ];
+    }
+
+    if ($failsData[$clientIp]['count'] >= $loginLimitCount) {
+        ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.block.php', $clientIp);
+        ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.php', $clientIp);
+        unset($failsData[$clientIp]);
+    }
+
+    $failOutput = ["<?php exit; ?>"];
+    foreach ($failsData as $ip => $data) {
+        $failOutput[] = "{$ip} {$data['timestamp']} {$data['count']}";
+    }
+    file_put_contents($failFile, implode("\n", $failOutput) . "\n", LOCK_EX);
+});
+
+add_action('wp_login', function($user_login, $user) {
+    $cloudflareMode = ip_block_get_config()['cloudflare_mode'];
+    if ($cloudflareMode && !empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        $clientIp = $_SERVER['HTTP_CF_CONNECTING_IP'];
+    } else {
+        $clientIp = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    }
+
+    $failFile = IP_BLOCK_DATA_DIR . '.login-fails.php';
+    if (!file_exists($failFile)) return;
+
+    $lines = file($failFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    $failsData = [];
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+        if ($trimmed === '' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) continue;
+        $parts = explode(' ', $trimmed, 3);
+        if (count($parts) < 3) continue;
+        list($ip, $timestamp, $count) = $parts;
+        if ($ip !== $clientIp) {
+            $failsData[$ip] = ['timestamp' => (int)$timestamp, 'count' => (int)$count];
+        }
+    }
+
+    $failOutput = ["<?php exit; ?>"];
+    foreach ($failsData as $ip => $data) {
+        $failOutput[] = "{$ip} {$data['timestamp']} {$data['count']}";
+    }
+    file_put_contents($failFile, implode("\n", $failOutput) . "\n", LOCK_EX);
+}, 10, 2);
+
+// 4. WordPress管理画面の設定メニューおよびサブメニュー追加
 add_action('admin_menu', function() {
     add_menu_page(
         'IP Block 管理',
@@ -589,6 +673,7 @@ function ip_block_dashboard_page_html() {
     <div class="wrap">
         <h1>🛡️ IP Block ダッシュボード (アクセス監視)</h1>
         <p>現在のレートリミット設定： <strong><?php echo (int)$config['time_window']; ?>秒</strong> の間に <strong><?php echo (int)$config['limit_count']; ?>回</strong> 以上のアクセスで自動ブロック</p>
+        <p>現在のログイン失敗制限： <strong><?php echo (int)$config['login_limit_count']; ?>回</strong> 間違えると自動ブロック</p>
         <p><strong>サーバー自身のIP（自動除外中）:</strong> <code><?php echo esc_html(IP_BLOCK_SERVER_MEIP); ?></code></p>
         
         <h2>📊 記録されているアクセス履歴</h2>
@@ -643,7 +728,7 @@ function ip_block_dashboard_page_html() {
     <?php
 }
 
-// 2. 詳細設定画面 (レートリミット & Cloudflareモード + [隠し機能] GitHubアクセストークン)
+// 2. 詳細設定画面
 function ip_block_settings_page_html() {
     if (!current_user_can('manage_options')) return;
     $configFile = IP_BLOCK_DATA_DIR . '.config.php';
@@ -658,8 +743,8 @@ function ip_block_settings_page_html() {
         $config['limit_count'] = max(1, (int)$_POST['limit_count']);
         $config['time_window'] = max(0.1, (float)$_POST['time_window']);
         $config['cloudflare_mode'] = isset($_POST['cloudflare_mode']) ? 1 : 0;
+        $config['login_limit_count'] = max(1, (int)$_POST['login_limit_count']);
         
-        // 設定保存時にサーバーIPキャッシュをクリアして再取得させる場合を考慮して保存
         ip_block_save_config($config);
 
         if ($is_hidden_mode && isset($_POST['github_token'])) {
@@ -691,6 +776,13 @@ function ip_block_settings_page_html() {
                     <td>
                         <input name="time_window" type="number" step="0.1" id="time_window" value="<?php echo esc_attr($config['time_window']); ?>" min="0.1" max="60" class="small-text" required>
                         <p class="description">この秒数内のアクセスをカウントします（例: 1.0秒なら1秒間に何回アクセスされたか）。</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="login_limit_count">ログイン失敗制限 (回)</label></th>
+                    <td>
+                        <input name="login_limit_count" type="number" id="login_limit_count" value="<?php echo esc_attr($config['login_limit_count']); ?>" min="1" max="20" class="small-text" required>
+                        <p class="description">ログインをこの回数連続で失敗すると、そのIPからのアクセスを自動的にブロックします（成功するとカウントはリセットされます）。</p>
                     </td>
                 </tr>
                 <tr>
@@ -737,7 +829,7 @@ function ip_block_blacklist_page_html() {
                     $rules[] = $t;
                 }
             }
-            $final_content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+            $final_content = "<?php exit; ?>\n" . (empty($rules) ? "" : implode("\n", $rules) . "\n");
             file_put_contents($blockFile, $final_content, LOCK_EX);
             echo '<div class="updated"><p><strong>ブロックリストを保存しました！</strong></p></div>';
         }
@@ -774,7 +866,7 @@ function ip_block_whitelist_page_html() {
                     $rules[] = $t;
                 }
             }
-            $final_content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+            $final_content = "<?php exit; ?>\n" . (empty($rules) ? "" : implode("\n", $rules) . "\n");
             file_put_contents($whiteFile, $final_content, LOCK_EX);
             echo '<div class="updated"><p><strong>ホワイトリストを保存しました！</strong></p></div>';
         }
@@ -811,7 +903,7 @@ function ip_block_exceptions_page_html() {
                     $rules[] = $t;
                 }
             }
-            $final_content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+            $final_content = "<?php exit; ?>\n" . (empty($rules) ? "" : implode("\n", $rules) . "\n");
             file_put_contents($exceptionFile, $final_content, LOCK_EX);
             echo '<div class="updated"><p><strong>例外パス設定を保存しました！</strong></p></div>';
         }
