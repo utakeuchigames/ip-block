@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.0.5
+ * Version:     1.0.6
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
@@ -759,17 +759,17 @@ function ip_block_settings_page_html() {
         
         ip_block_save_config($config);
 
-        // mu-plugins へのコピー・削除の自動切り替え処理 & プラグイン名の(mu mode)付与書き換え
+        // mu-plugins へのコピー・削除の自動切り替え処理 & プラグイン名の書き換え・通常プラグインの自動停止/起動制御
         $mu_dir = defined('WPMU_PLUGIN_DIR') ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins';
         if (!file_exists($mu_dir)) {
             wp_mkdir_p($mu_dir);
         }
         $target_mu_file = $mu_dir . '/ip-block.php';
-        $target_mu_get = $mu_dir . '/ip-get.php';
-        $source_get = __DIR__ . '/ip-get.php';
+        
+        $mu_src_dir = $mu_dir . '/src';
+        $source_src_dir = __DIR__ . '/src';
 
         if ($new_mu_mode === 1) {
-            // ファイルの中身を読み込んで Plugin Name を変更して mu-plugins に書き込む
             $source_code = file_get_contents(__FILE__);
             $modified_code = str_replace(
                 'Plugin Name: IP Block & Rate Limiter Manager',
@@ -778,20 +778,30 @@ function ip_block_settings_page_html() {
             );
             file_put_contents($target_mu_file, $modified_code, LOCK_EX);
 
-            if (file_exists($source_get)) {
-                copy($source_get, $target_mu_get);
+            if (!file_exists($mu_src_dir)) {
+                wp_mkdir_p($mu_src_dir);
             }
-            // 通常プラグインとして有効化されていたら自動的に停止する
+            if (file_exists($source_src_dir . '/ip-get.php')) {
+                copy($source_src_dir . '/ip-get.php', $mu_src_dir . '/ip-get.php');
+            }
+
             if (is_plugin_active('ip-block/ip-block.php')) {
                 deactivate_plugins('ip-block/ip-block.php');
             }
         } else {
-            // 通常モードに戻すときは mu-plugins からファイルを削除
             if (file_exists($target_mu_file)) {
                 @unlink($target_mu_file);
             }
-            if (file_exists($target_mu_get)) {
-                @unlink($target_mu_get);
+            if (file_exists($mu_src_dir . '/ip-get.php')) {
+                @unlink($mu_src_dir . '/ip-get.php');
+            }
+            if (file_exists($mu_src_dir)) {
+                @rmdir($mu_src_dir);
+            }
+
+            // muモード解除時は自動的に通常プラグインを有効化（起動）する
+            if (!is_plugin_active('ip-block/ip-block.php')) {
+                activate_plugin('ip-block/ip-block.php');
             }
         }
 
@@ -848,7 +858,7 @@ function ip_block_settings_page_html() {
                     <td>
                         <label for="mu_plugin_mode">
                             <input name="mu_plugin_mode" type="checkbox" id="mu_plugin_mode" value="1" <?php checked($config['mu_plugin_mode'], 1); ?>>
-                            ONにすると自動的に <code>wp-content/mu-plugins/</code> に配置され、プラグイン名が <code>(mu mode)</code> 付きに変化して最速ブロックが有効になります
+                            ONにすると自動配置＆通常版停止。OFFにすると自動削除＆通常版が自動で再起動（有効化）されます
                         </label>
                         <p class="description">有効にするとWordfenceなどの検知よりも手前で門前払いが可能になります。</p>
                     </td>
