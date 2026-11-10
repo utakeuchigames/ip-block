@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.0.1
+ * Version:     1.0.2
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
@@ -52,7 +52,7 @@ if (file_exists(__DIR__ . '/plugin-update-checker/plugin-update-checker.php')) {
 }
 
 /**
- * 設定ファイルから有効なルールだけを抽出する関数
+ * 設定ファイル(.php)から有効なルールだけを抽出する関数
  */
 function parse_env_file_rules($filepath) {
     if (!file_exists($filepath)) return [];
@@ -60,27 +60,10 @@ function parse_env_file_rules($filepath) {
     $lines = file($filepath, FILE_IGNORE_NEW_LINES);
     if ($lines === false) return [];
 
-    $has_marker = false;
-    foreach ($lines as $line) {
-        if (strpos(trim($line), '#/ Clients can configure settings from here.') !== false) {
-            $has_marker = true;
-            break;
-        }
-    }
-
     $rules = [];
-    $start_reading = !$has_marker;
-
     foreach ($lines as $line) {
         $trimmed = trim($line);
-        if (!$start_reading) {
-            if (strpos($trimmed, '#/ Clients can configure settings from here.') !== false) {
-                $start_reading = true;
-            }
-            continue;
-        }
-
-        if ($trimmed === '' || $trimmed[0] === '#') {
+        if ($trimmed === '' || $trimmed[0] === '#' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) {
             continue;
         }
         $rules[] = $trimmed;
@@ -92,7 +75,7 @@ function parse_env_file_rules($filepath) {
  * 詳細設定（レートリミット設定等）を取得する関数
  */
 function ip_block_get_config() {
-    $configFile = IP_BLOCK_DATA_DIR . '.config.env';
+    $configFile = IP_BLOCK_DATA_DIR . '.config.php';
     $config = [
         'limit_count' => 5,
         'time_window' => 1.0,
@@ -102,7 +85,7 @@ function ip_block_get_config() {
         $lines = file($configFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
             $line = trim($line);
-            if ($line === '' || $line[0] === '#') continue;
+            if ($line === '' || $line[0] === '#' || strpos($line, '<?php') !== false || strpos($line, 'exit') !== false) continue;
             if (strpos($line, '=') !== false) {
                 list($key, $val) = explode('=', $line, 2);
                 $key = strtolower(trim($key));
@@ -149,7 +132,7 @@ function check_white_list($ip) {
         return true;
     }
 
-    $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
+    $whiteFile = IP_BLOCK_DATA_DIR . '.white.php';
     $rules = parse_env_file_rules($whiteFile);
     
     foreach ($rules as $range) {
@@ -164,7 +147,7 @@ function check_white_list($ip) {
  * 厳密にホワイトリストに含まれているか（ボタン表示用）
  */
 function ip_block_is_in_whitelist($ip) {
-    $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
+    $whiteFile = IP_BLOCK_DATA_DIR . '.white.php';
     $rules = parse_env_file_rules($whiteFile);
     foreach ($rules as $range) {
         if (ip_in_cidr($ip, $range)) {
@@ -178,7 +161,7 @@ function ip_block_is_in_whitelist($ip) {
  * ブロックリストチェック
  */
 function check_block_list($ip) {
-    $blockFile = IP_BLOCK_DATA_DIR . '.block.env';
+    $blockFile = IP_BLOCK_DATA_DIR . '.block.php';
     $rules = parse_env_file_rules($blockFile);
     
     foreach ($rules as $range) {
@@ -195,8 +178,12 @@ function check_block_list($ip) {
 function ip_block_append_to_file($filepath, $ip) {
     if ($ip === IP_BLOCK_SERVER_MEIP) return;
 
-    $currentIps = file_exists($filepath) ? file($filepath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
-    $currentIps = array_map('trim', $currentIps);
+    if (!file_exists($filepath) || filesize($filepath) === 0) {
+        file_put_contents($filepath, "<?php exit; ?>\n" . $ip . "\n", LOCK_EX);
+        return;
+    }
+
+    $currentIps = parse_env_file_rules($filepath);
 
     $exists = false;
     foreach ($currentIps as $existing) {
@@ -207,18 +194,7 @@ function ip_block_append_to_file($filepath, $ip) {
     }
 
     if (!$exists) {
-        $appendData = $ip;
-        if (file_exists($filepath) && filesize($filepath) > 0) {
-            $fp = fopen($filepath, 'r');
-            fseek($fp, -1, SEEK_END);
-            $lastChar = fgetc($fp);
-            fclose($fp);
-
-            if ($lastChar !== "\n" && $lastChar !== "\r") {
-                $appendData = PHP_EOL . $ip;
-            }
-        }
-        file_put_contents($filepath, $appendData, FILE_APPEND | LOCK_EX);
+        file_put_contents($filepath, $ip . "\n", FILE_APPEND | LOCK_EX);
     }
 }
 
@@ -231,48 +207,44 @@ function ip_block_remove_from_file($filepath, $ip) {
     $lines = file($filepath, FILE_IGNORE_NEW_LINES);
     if ($lines === false) return;
 
-    $new_lines = [];
+    $new_lines = ["<?php exit; ?>"];
     foreach ($lines as $line) {
         $trimmed = trim($line);
-        if ($trimmed === '' || $trimmed[0] === '#' || strpos($trimmed, '#/') === 0) {
-            $new_lines[] = $line;
+        if ($trimmed === '' || $trimmed[0] === '#' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) {
             continue;
         }
         if ($trimmed === $ip || ip_in_cidr($ip, $trimmed)) {
             continue;
         }
-        $new_lines[] = $line;
+        $new_lines[] = $trimmed;
     }
 
     file_put_contents($filepath, implode("\n", $new_lines) . "\n", LOCK_EX);
 }
 
 /**
- * アクセス履歴（.history.env）から特定のIPの行を削除する関数
+ * アクセス履歴（.history.php）から特定のIPの行を削除する関数
  */
 function ip_block_remove_history_ip($ip_to_remove) {
-    $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
+    $historyFile = IP_BLOCK_DATA_DIR . '.history.php';
     if (!file_exists($historyFile)) return;
 
-    $fp = fopen($historyFile, 'r+');
-    if (flock($fp, LOCK_EX)) {
-        $lines = [];
-        while (($line = fgets($fp)) !== false) {
-            $trimmed = trim($line);
-            if ($trimmed === '') continue;
-            $parts = explode(' ', $trimmed, 4);
-            if (count($parts) >= 1 && $parts[0] !== $ip_to_remove) {
-                $lines[] = $trimmed;
-            }
+    $lines = file($historyFile, FILE_IGNORE_NEW_LINES);
+    if ($lines === false) return;
+
+    $new_lines = ["<?php exit; ?>"];
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+        if ($trimmed === '' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) {
+            continue;
         }
-        ftruncate($fp, 0);
-        rewind($fp);
-        if (!empty($lines)) {
-            fwrite($fp, implode("\n", $lines) . "\n");
+        $parts = explode(' ', $trimmed, 4);
+        if (count($parts) >= 1 && $parts[0] !== $ip_to_remove) {
+            $new_lines[] = $trimmed;
         }
-        flock($fp, LOCK_UN);
-        fclose($fp);
     }
+
+    file_put_contents($historyFile, implode("\n", $new_lines) . "\n", LOCK_EX);
 }
 
 /**
@@ -280,7 +252,7 @@ function ip_block_remove_history_ip($ip_to_remove) {
  */
 function addBlockedIp($ip, $file) {
     ip_block_append_to_file($file, $ip);
-    ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.env', $ip);
+    ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.php', $ip);
     http_response_code(403);
     exit;
 }
@@ -294,7 +266,6 @@ add_action('init', function() {
 
     if (check_white_list($clientIp)) {
         $accesscheck = true;
-        // ホワイトリストに入っている場合もアクセス履歴（.history.env）は記録する
     }
 
     if (check_block_list($clientIp)) {
@@ -303,9 +274,9 @@ add_action('init', function() {
     }
 
     // === 例外パス（スキップ対象）のチェック ===
-    $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.env';
+    $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.php';
     if (file_exists($exceptionFile)) {
-        $exceptions = file($exceptionFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $exceptions = parse_env_file_rules($exceptionFile);
         $currentPath = $_SERVER['PHP_SELF'];
         
         foreach ($exceptions as $exPattern) {
@@ -326,101 +297,84 @@ add_action('init', function() {
     $config = ip_block_get_config();
     $limitCount = $config['limit_count'];      
     $timeWindow = $config['time_window'];      
-    $accessFile = IP_BLOCK_DATA_DIR . '.access.env';
+    $accessFile = IP_BLOCK_DATA_DIR . '.access.php';
 
-    if (!file_exists($accessFile)) {
-        file_put_contents($accessFile, "");
-    }
-
-    $fp = fopen($accessFile, 'r+');
-    if (flock($fp, LOCK_EX)) {
-        $clientData = null;
-        $otherData = [];
-
-        while (($line = fgets($fp)) !== false) {
-            $line = trim($line);
-            if ($line === '') continue;
-            
-            $parts = explode(' ', $line, 3);
+    // --- A. レートリミット監視 (.access.php) ---
+    $accessData = [];
+    if (file_exists($accessFile)) {
+        $lines = file($accessFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) continue;
+            $parts = explode(' ', $trimmed, 3);
             if (count($parts) < 3) continue;
-            
             list($ip, $timestamp, $count) = $parts;
-            $timestamp = (float)$timestamp;
-            $count = (int)$count;
-            
-            if (($currentTime - $timestamp) < $timeWindow) {
-                if ($ip === $clientIp) {
-                    $clientData = ['timestamp' => $timestamp, 'count' => $count];
-                } else {
-                    $otherData[] = "{$ip} {$timestamp} {$count}";
-                }
-            }
+            $accessData[$ip] = ['timestamp' => (float)$timestamp, 'count' => (int)$count];
         }
-
-        if ($clientData !== null) {
-            if ($clientData['count'] >= $limitCount) {
-                flock($fp, LOCK_UN);
-                fclose($fp);
-                addBlockedIp($clientIp, IP_BLOCK_DATA_DIR . '.block.env');
-                exit;
-            }
-            $newCount = $clientData['count'] + 1;
-            $newTimestamp = $clientData['timestamp'];
-        } else {
-            $newCount = 1;
-            $newTimestamp = $currentTime;
-        }
-
-        $otherData[] = "{$clientIp} {$newTimestamp} {$newCount}";
-
-        ftruncate($fp, 0);
-        rewind($fp);
-        fwrite($fp, implode("\n", $otherData) . "\n");
-        flock($fp, LOCK_UN);
-        fclose($fp);
     }
 
-    // --- B. アクセス履歴・統計保存 (.history.env) ---
-    $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
-    if (!file_exists($historyFile)) {
-        file_put_contents($historyFile, "");
+    // 古いデータの掃除と現在のIPのカウント更新
+    $newAccessData = [];
+    foreach ($accessData as $ip => $data) {
+        if (($currentTime - $data['timestamp']) < $timeWindow) {
+            $newAccessData[$ip] = $data;
+        }
     }
 
-    $fp_h = fopen($historyFile, 'r+');
-    if (flock($fp_h, LOCK_EX)) {
-        $historyData = [];
-        $foundClient = false;
+    if (isset($newAccessData[$clientIp])) {
+        if ($newAccessData[$clientIp]['count'] >= $limitCount) {
+            addBlockedIp($clientIp, IP_BLOCK_DATA_DIR . '.block.php');
+        }
+        $newAccessData[$clientIp]['count']++;
+    } else {
+        $newAccessData[$clientIp] = [
+            'timestamp' => $currentTime,
+            'count' => 1
+        ];
+    }
 
-        while (($line = fgets($fp_h)) !== false) {
-            $line = trim($line);
-            if ($line === '') continue;
-            
-            $parts = explode(' ', $line, 4);
+    $accessOutput = ["<?php exit; ?>"];
+    foreach ($newAccessData as $ip => $data) {
+        $accessOutput[] = "{$ip} {$data['timestamp']} {$data['count']}";
+    }
+    file_put_contents($accessFile, implode("\n", $accessOutput) . "\n", LOCK_EX);
+
+    // --- B. アクセス履歴・統計保存 (.history.php) ---
+    $historyFile = IP_BLOCK_DATA_DIR . '.history.php';
+    $historyData = [];
+    if (file_exists($historyFile)) {
+        $lines = file($historyFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if ($trimmed === '' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) continue;
+            $parts = explode(' ', $trimmed, 4);
             if (count($parts) < 4) continue;
-            
             list($ip, $timestamp, $count, $lastfile) = $parts;
-            $timestamp = (float)$timestamp;
-            $count = (int)$count;
-
-            if ($ip === $clientIp) {
-                $count++;
-                $timestamp = $currentTime;
-                $lastfile = $currentUri;
-                $foundClient = true;
-            }
-            $historyData[] = "{$ip} {$timestamp} {$count} {$lastfile}";
+            $historyData[$ip] = [
+                'timestamp' => (float)$timestamp,
+                'count' => (int)$count,
+                'lastfile' => $lastfile
+            ];
         }
-
-        if (!$foundClient) {
-            $historyData[] = "{$clientIp} {$currentTime} 1 {$currentUri}";
-        }
-
-        ftruncate($fp_h, 0);
-        rewind($fp_h);
-        fwrite($fp_h, implode("\n", $historyData) . "\n");
-        flock($fp_h, LOCK_UN);
-        fclose($fp_h);
     }
+
+    if (isset($historyData[$clientIp])) {
+        $historyData[$clientIp]['count']++;
+        $historyData[$clientIp]['timestamp'] = $currentTime;
+        $historyData[$clientIp]['lastfile'] = $currentUri;
+    } else {
+        $historyData[$clientIp] = [
+            'timestamp' => $currentTime,
+            'count' => 1,
+            'lastfile' => $currentUri
+        ];
+    }
+
+    $historyOutput = ["<?php exit; ?>"];
+    foreach ($historyData as $ip => $data) {
+        $historyOutput[] = "{$ip} {$data['timestamp']} {$data['count']} {$data['lastfile']}";
+    }
+    file_put_contents($historyFile, implode("\n", $historyOutput) . "\n", LOCK_EX);
     
     if (check_white_list($clientIp)) {
         return;
@@ -500,28 +454,30 @@ function ip_block_dashboard_page_html() {
 
         if (filter_var($target_ip, FILTER_VALIDATE_IP)) {
             if ($action_type === 'block') {
-                ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.block.env', $target_ip);
-                ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.env', $target_ip);
+                ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.block.php', $target_ip);
+                ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.php', $target_ip);
                 ip_block_remove_history_ip($target_ip);
                 echo '<div class="updated"><p><strong>IP <code>' . esc_html($target_ip) . '</code> をブロックリストに追加し、ホワイトリストから除外してアクセス履歴から削除しました。</strong></p></div>';
             } elseif ($action_type === 'whitelist_add') {
-                ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.white.env', $target_ip);
+                ip_block_append_to_file(IP_BLOCK_DATA_DIR . '.white.php', $target_ip);
                 echo '<div class="updated"><p><strong>IP <code>' . esc_html($target_ip) . '</code> をホワイトリストに追加しました（アクセス履歴は保持されます）。</strong></p></div>';
             } elseif ($action_type === 'whitelist_remove') {
-                ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.env', $target_ip);
+                ip_block_remove_from_file(IP_BLOCK_DATA_DIR . '.white.php', $target_ip);
                 echo '<div class="updated"><p><strong>IP <code>' . esc_html($target_ip) . '</code> をホワイトリストから外しました。</strong></p></div>';
             }
         }
     }
 
-    $historyFile = IP_BLOCK_DATA_DIR . '.history.env';
+    $historyFile = IP_BLOCK_DATA_DIR . '.history.php';
     $config = ip_block_get_config();
 
     $active_accesses = [];
     if (file_exists($historyFile)) {
         $lines = file($historyFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
-            $parts = explode(' ', trim($line), 4);
+            $trimmed = trim($line);
+            if ($trimmed === '' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) continue;
+            $parts = explode(' ', $trimmed, 4);
             if (count($parts) >= 4) {
                 list($ip, $timestamp, $count, $lastfile) = $parts;
                 
@@ -599,14 +555,14 @@ function ip_block_dashboard_page_html() {
 // 2. 詳細設定画面 (レートリミット等)
 function ip_block_settings_page_html() {
     if (!current_user_can('manage_options')) return;
-    $configFile = IP_BLOCK_DATA_DIR . '.config.env';
+    $configFile = IP_BLOCK_DATA_DIR . '.config.php';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_settings_nonce');
         $limit_count = max(1, (int)$_POST['limit_count']);
         $time_window = max(0.1, (float)$_POST['time_window']);
 
-        $newConfigData = "LIMIT_COUNT={$limit_count}\nTIME_WINDOW={$time_window}\n";
+        $newConfigData = "<?php exit; ?>\nLIMIT_COUNT={$limit_count}\nTIME_WINDOW={$time_window}\n";
         file_put_contents($configFile, $newConfigData, LOCK_EX);
         echo '<div class="updated"><p><strong>詳細設定を保存しました！</strong></p></div>';
     }
@@ -642,19 +598,29 @@ function ip_block_settings_page_html() {
 // 3. ブロックリスト設定画面
 function ip_block_blacklist_page_html() {
     if (!current_user_can('manage_options')) return;
-    $blockFile = IP_BLOCK_DATA_DIR . '.block.env';
+    $blockFile = IP_BLOCK_DATA_DIR . '.block.php';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_blacklist_nonce');
         if (isset($_POST['block_content'])) {
-            file_put_contents($blockFile, sanitize_textarea_field(wp_unslash($_POST['block_content'])));
+            $raw_content = wp_unslash($_POST['block_content']);
+            $rules = [];
+            foreach (explode("\n", $raw_content) as $line) {
+                $t = trim($line);
+                if ($t !== '' && strpos($t, '<?php') === false && strpos($t, 'exit') === false) {
+                    $rules[] = $t;
+                }
+            }
+            $final_content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+            file_put_contents($blockFile, $final_content, LOCK_EX);
             echo '<div class="updated"><p><strong>ブロックリストを保存しました！</strong></p></div>';
         }
     }
-    $block_data = file_exists($blockFile) ? file_get_contents($blockFile) : '';
+    $block_rules = parse_env_file_rules($blockFile);
+    $block_data = implode("\n", $block_rules);
     ?>
     <div class="wrap">
-        <h1>🚫 ブロックリスト設定 (.block.env)</h1>
+        <h1>🚫 ブロックリスト設定 (.block.php)</h1>
         <form method="post" action="">
             <?php wp_nonce_field('ip_block_blacklist_nonce'); ?>
             <textarea name="block_content" rows="12" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($block_data); ?></textarea>
@@ -669,19 +635,29 @@ function ip_block_blacklist_page_html() {
 // 4. ホワイトリスト設定画面
 function ip_block_whitelist_page_html() {
     if (!current_user_can('manage_options')) return;
-    $whiteFile = IP_BLOCK_DATA_DIR . '.white.env';
+    $whiteFile = IP_BLOCK_DATA_DIR . '.white.php';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_whitelist_nonce');
         if (isset($_POST['white_content'])) {
-            file_put_contents($whiteFile, sanitize_textarea_field(wp_unslash($_POST['white_content'])));
+            $raw_content = wp_unslash($_POST['white_content']);
+            $rules = [];
+            foreach (explode("\n", $raw_content) as $line) {
+                $t = trim($line);
+                if ($t !== '' && strpos($t, '<?php') === false && strpos($t, 'exit') === false) {
+                    $rules[] = $t;
+                }
+            }
+            $final_content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+            file_put_contents($whiteFile, $final_content, LOCK_EX);
             echo '<div class="updated"><p><strong>ホワイトリストを保存しました！</strong></p></div>';
         }
     }
-    $white_data = file_exists($whiteFile) ? file_get_contents($whiteFile) : '';
+    $white_rules = parse_env_file_rules($whiteFile);
+    $white_data = implode("\n", $white_rules);
     ?>
     <div class="wrap">
-        <h1>⚪ ホワイトリスト設定 (.white.env)</h1>
+        <h1>⚪ ホワイトリスト設定 (.white.php)</h1>
         <form method="post" action="">
             <?php wp_nonce_field('ip_block_whitelist_nonce'); ?>
             <textarea name="white_content" rows="12" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($white_data); ?></textarea>
@@ -696,19 +672,29 @@ function ip_block_whitelist_page_html() {
 // 5. 例外パス設定画面
 function ip_block_exceptions_page_html() {
     if (!current_user_can('manage_options')) return;
-    $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.env';
+    $exceptionFile = IP_BLOCK_DATA_DIR . '.exception.php';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_exceptions_nonce');
         if (isset($_POST['exception_content'])) {
-            file_put_contents($exceptionFile, sanitize_textarea_field(wp_unslash($_POST['exception_content'])));
+            $raw_content = wp_unslash($_POST['exception_content']);
+            $rules = [];
+            foreach (explode("\n", $raw_content) as $line) {
+                $t = trim($line);
+                if ($t !== '' && strpos($t, '<?php') === false && strpos($t, 'exit') === false) {
+                    $rules[] = $t;
+                }
+            }
+            $final_content = "<?php exit; ?>\n" . implode("\n", $rules) . "\n";
+            file_put_contents($exceptionFile, $final_content, LOCK_EX);
             echo '<div class="updated"><p><strong>例外パス設定を保存しました！</strong></p></div>';
         }
     }
-    $exception_data = file_exists($exceptionFile) ? file_get_contents($exceptionFile) : '';
+    $ex_rules = parse_env_file_rules($exceptionFile);
+    $exception_data = implode("\n", $ex_rules);
     ?>
     <div class="wrap">
-        <h1>⏩ 例外パス設定 (.exception.env)</h1>
+        <h1>⏩ 例外パス設定 (.exception.php)</h1>
         <form method="post" action="">
             <?php wp_nonce_field('ip_block_exceptions_nonce'); ?>
             <textarea name="exception_content" rows="12" style="width: 100%; font-family: monospace;"><?php echo esc_textarea($exception_data); ?></textarea>
