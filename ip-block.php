@@ -96,9 +96,9 @@ function ip_block_get_server_meip() {
 
     $mu_dir = defined('WPMU_PLUGIN_DIR') ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins';
     if (strpos(__FILE__, $mu_dir) === 0) {
-        $my_ip_endpoint = content_url('mu-plugins/ip-get.php');
+        $my_ip_endpoint = content_url('mu-plugins/src/ip-get.php');
     } else {
-        $my_ip_endpoint = plugins_url('ip-get.php', __FILE__);
+        $my_ip_endpoint = plugins_url('src/ip-get.php', __FILE__);
     }
 
     $response = wp_remote_get($my_ip_endpoint, ['timeout' => 3, 'sslverify' => false]);
