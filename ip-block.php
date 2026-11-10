@@ -3,7 +3,7 @@
  * Plugin Name: IP Block & Rate Limiter Manager
  * Plugin URI:  https://github.com/utakeuchigames/ip-block
  * Description: 高度なIPブロック、例外パス、レートリミット監視および管理画面機能を提供するセキュリティプラグインです。
- * Version:     1.0.2
+ * Version:     1.0.3
  * Requires at least: 7.0
  * Tested up to: 7.1.4
  * Author:      utakeuchigames
@@ -20,9 +20,6 @@ if (!defined('URL_ROOT')) {
     define('URL_ROOT', plugin_dir_path(__FILE__));
 }
 
-$server_ip = gethostbyname($_SERVER['SERVER_NAME'] ?? 'localhost');
-define('IP_BLOCK_SERVER_MEIP', $server_ip);
-
 $upload_dir = wp_upload_dir();
 define('IP_BLOCK_DATA_DIR', $upload_dir['basedir'] . '/ip-block-data/');
 
@@ -30,10 +27,125 @@ if (!file_exists(IP_BLOCK_DATA_DIR)) {
     wp_mkdir_p(IP_BLOCK_DATA_DIR);
 }
 
+/**
+ * 設定ファイル(.php)から設定値を取得する関数
+ */
+function ip_block_get_config() {
+    $configFile = IP_BLOCK_DATA_DIR . '.config.php';
+    $config = [
+        'limit_count' => 5,
+        'time_window' => 1.0,
+        'cloudflare_mode' => 0,
+        'server_meip' => '',
+    ];
+
+    if (file_exists($configFile)) {
+        $lines = file($configFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#' || strpos($line, '<?php') !== false || strpos($line, 'exit') !== false) continue;
+            if (strpos($line, '=') !== false) {
+                list($key, $val) = explode('=', $line, 2);
+                $key = strtolower(trim($key));
+                $val = trim($val);
+                if ($key === 'limit_count') {
+                    $config['limit_count'] = max(1, (int)$val);
+                } elseif ($key === 'time_window') {
+                    $config['time_window'] = max(0.1, (float)$val);
+                } elseif ($key === 'cloudflare_mode') {
+                    $config['cloudflare_mode'] = (int)$val;
+                } elseif ($key === 'server_meip') {
+                    $config['server_meip'] = $val;
+                }
+            }
+        }
+    }
+    return $config;
+}
+
+/**
+ * 設定を保存する関数
+ */
+function ip_block_save_config($config) {
+    $configFile = IP_BLOCK_DATA_DIR . '.config.php';
+    $content = "<?php exit; ?>\n";
+    $content .= "LIMIT_COUNT=" . (int)$config['limit_count'] . "\n";
+    $content .= "TIME_WINDOW=" . (float)$config['time_window'] . "\n";
+    $content .= "CLOUDFLARE_MODE=" . (int)$config['cloudflare_mode'] . "\n";
+    $content .= "SERVER_MEIP=" . sanitize_text_field($config['server_meip']) . "\n";
+    file_put_contents($configFile, $content, LOCK_EX);
+}
+
+/**
+ * 自作の ip-get.php を叩いてサーバー自身のグローバルIPを自動取得する関数
+ */
+function ip_block_get_server_meip() {
+    $config = ip_block_get_config();
+
+    if (!empty($config['server_meip']) && filter_var($config['server_meip'], FILTER_VALIDATE_IP)) {
+        return $config['server_meip'];
+    }
+
+    // プラグイン内にある ip-get.php のURLを自動生成して叩く
+    $my_ip_endpoint = plugins_url('ip-get.php', __FILE__);
+
+    $response = wp_remote_get($my_ip_endpoint, ['timeout' => 3, 'sslverify' => false]);
+    $detected_ip = '';
+
+    if (!is_wp_error($response)) {
+        $body = trim(wp_remote_retrieve_body($response));
+        
+        // JSONのパースを試みる（シングルクォート混じりや標準JSONに対応）
+        $json_data = json_decode($body, true);
+        if (!$json_data) {
+            $fixed_body = str_replace("'", '"', $body);
+            $json_data = json_decode($fixed_body, true);
+        }
+
+        if (!empty($json_data['ip']) && filter_var($json_data['ip'], FILTER_VALIDATE_IP)) {
+            $detected_ip = $json_data['ip'];
+        } elseif (filter_var($body, FILTER_VALIDATE_IP)) {
+            $detected_ip = $body;
+        }
+    }
+
+    // 取得に失敗した場合のフォールバック
+    if (empty($detected_ip)) {
+        $detected_ip = $_SERVER['SERVER_ADDR'] ?? '127.0.0.1';
+    }
+
+    $config['server_meip'] = $detected_ip;
+    ip_block_save_config($config);
+
+    return $detected_ip;
+}
+
+define('IP_BLOCK_SERVER_MEIP', ip_block_get_server_meip());
+
+/**
+ * GitHubアクセストークンを取得する関数
+ */
+function ip_block_get_github_token() {
+    $tokenFile = IP_BLOCK_DATA_DIR . '.token.php';
+    if (!file_exists($tokenFile)) return '';
+
+    $lines = file($tokenFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $trimmed = trim($line);
+        if ($trimmed === '' || $trimmed[0] === '#' || strpos($trimmed, '<?php') !== false || strpos($trimmed, 'exit') !== false) {
+            continue;
+        }
+        return $trimmed;
+    }
+    return '';
+}
+
 // 1. Plugin Update Checker (v5/v6対応) の組み込み
 if (file_exists(__DIR__ . '/plugin-update-checker/plugin-update-checker.php')) {
     require_once __DIR__ . '/plugin-update-checker/plugin-update-checker.php';
     
+    $github_token = ip_block_get_github_token();
+
     if (class_exists('YahnisElsts\PluginUpdateChecker\v5\PucFactory')) {
         $myUpdateChecker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
             'https://github.com/utakeuchigames/ip-block',
@@ -41,6 +153,9 @@ if (file_exists(__DIR__ . '/plugin-update-checker/plugin-update-checker.php')) {
             'ip-block'
         );
         $myUpdateChecker->setBranch('main');
+        if (!empty($github_token)) {
+            $myUpdateChecker->setAuthentication($github_token);
+        }
     } elseif (class_exists('YahnisElsts\PluginUpdateChecker\v6\PucFactory')) {
         $myUpdateChecker = YahnisElsts\PluginUpdateChecker\v6\PucFactory::buildUpdateChecker(
             'https://github.com/utakeuchigames/ip-block',
@@ -48,6 +163,9 @@ if (file_exists(__DIR__ . '/plugin-update-checker/plugin-update-checker.php')) {
             'ip-block'
         );
         $myUpdateChecker->setBranch('main');
+        if (!empty($github_token)) {
+            $myUpdateChecker->setAuthentication($github_token);
+        }
     }
 }
 
@@ -69,36 +187,6 @@ function parse_env_file_rules($filepath) {
         $rules[] = $trimmed;
     }
     return $rules;
-}
-
-/**
- * 詳細設定（レートリミット設定等）を取得する関数
- */
-function ip_block_get_config() {
-    $configFile = IP_BLOCK_DATA_DIR . '.config.php';
-    $config = [
-        'limit_count' => 5,
-        'time_window' => 1.0,
-    ];
-
-    if (file_exists($configFile)) {
-        $lines = file($configFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if ($line === '' || $line[0] === '#' || strpos($line, '<?php') !== false || strpos($line, 'exit') !== false) continue;
-            if (strpos($line, '=') !== false) {
-                list($key, $val) = explode('=', $line, 2);
-                $key = strtolower(trim($key));
-                $val = trim($val);
-                if ($key === 'limit_count') {
-                    $config['limit_count'] = max(1, (int)$val);
-                } elseif ($key === 'time_window') {
-                    $config['time_window'] = max(0.1, (float)$val);
-                }
-            }
-        }
-    }
-    return $config;
 }
 
 /**
@@ -262,7 +350,16 @@ add_action('init', function() {
     global $accesscheck;
     if (!empty($accesscheck)) return;
 
-    $clientIp = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    $config = ip_block_get_config();
+    $limitCount = $config['limit_count'];      
+    $timeWindow = $config['time_window'];      
+    $cloudflareMode = $config['cloudflare_mode'];
+
+    if ($cloudflareMode && !empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        $clientIp = $_SERVER['HTTP_CF_CONNECTING_IP'];
+    } else {
+        $clientIp = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    }
 
     if (check_white_list($clientIp)) {
         $accesscheck = true;
@@ -293,10 +390,6 @@ add_action('init', function() {
 
     $currentTime = microtime(true);
     $currentUri = $_SERVER['REQUEST_URI'];
-
-    $config = ip_block_get_config();
-    $limitCount = $config['limit_count'];      
-    $timeWindow = $config['time_window'];      
     $accessFile = IP_BLOCK_DATA_DIR . '.access.php';
 
     // --- A. レートリミット監視 (.access.php) ---
@@ -313,7 +406,6 @@ add_action('init', function() {
         }
     }
 
-    // 古いデータの掃除と現在のIPのカウント更新
     $newAccessData = [];
     foreach ($accessData as $ip => $data) {
         if (($currentTime - $data['timestamp']) < $timeWindow) {
@@ -446,7 +538,6 @@ add_action('admin_menu', function() {
 function ip_block_dashboard_page_html() {
     if (!current_user_can('manage_options')) return;
 
-    // テーブル上のボタン処理
     if (isset($_POST['ip_action']) && isset($_POST['target_ip'])) {
         check_admin_referer('ip_block_action_nonce_action', 'ip_block_action_nonce');
         $target_ip = sanitize_text_field($_POST['target_ip']);
@@ -552,25 +643,39 @@ function ip_block_dashboard_page_html() {
     <?php
 }
 
-// 2. 詳細設定画面 (レートリミット等)
+// 2. 詳細設定画面 (レートリミット & Cloudflareモード + [隠し機能] GitHubアクセストークン)
 function ip_block_settings_page_html() {
     if (!current_user_can('manage_options')) return;
     $configFile = IP_BLOCK_DATA_DIR . '.config.php';
+    $tokenFile = IP_BLOCK_DATA_DIR . '.token.php';
+
+    $is_hidden_mode = isset($_GET['secret']) && $_GET['secret'] === 'token';
 
     if (isset($_POST['ip_block_submit'])) {
         check_admin_referer('ip_block_settings_nonce');
-        $limit_count = max(1, (int)$_POST['limit_count']);
-        $time_window = max(0.1, (float)$_POST['time_window']);
+        
+        $config = ip_block_get_config();
+        $config['limit_count'] = max(1, (int)$_POST['limit_count']);
+        $config['time_window'] = max(0.1, (float)$_POST['time_window']);
+        $config['cloudflare_mode'] = isset($_POST['cloudflare_mode']) ? 1 : 0;
+        
+        // 設定保存時にサーバーIPキャッシュをクリアして再取得させる場合を考慮して保存
+        ip_block_save_config($config);
 
-        $newConfigData = "<?php exit; ?>\nLIMIT_COUNT={$limit_count}\nTIME_WINDOW={$time_window}\n";
-        file_put_contents($configFile, $newConfigData, LOCK_EX);
+        if ($is_hidden_mode && isset($_POST['github_token'])) {
+            $github_token = sanitize_text_field($_POST['github_token']);
+            $newTokenData = "<?php exit; ?>\n" . $github_token . "\n";
+            file_put_contents($tokenFile, $newTokenData, LOCK_EX);
+        }
+
         echo '<div class="updated"><p><strong>詳細設定を保存しました！</strong></p></div>';
     }
 
     $config = ip_block_get_config();
+    $current_token = ip_block_get_github_token();
     ?>
     <div class="wrap">
-        <h1>⚙️ 詳細設定 (レートリミット調整)</h1>
+        <h1>⚙️ 詳細設定</h1>
         <form method="post" action="">
             <?php wp_nonce_field('ip_block_settings_nonce'); ?>
             <table class="form-table">
@@ -588,6 +693,27 @@ function ip_block_settings_page_html() {
                         <p class="description">この秒数内のアクセスをカウントします（例: 1.0秒なら1秒間に何回アクセスされたか）。</p>
                     </td>
                 </tr>
+                <tr>
+                    <th scope="row">Cloudflare対応モード</th>
+                    <td>
+                        <label for="cloudflare_mode">
+                            <input name="cloudflare_mode" type="checkbox" id="cloudflare_mode" value="1" <?php checked($config['cloudflare_mode'], 1); ?>>
+                            Cloudflare経由のアクセス元IP（<code>HTTP_CF_CONNECTING_IP</code>）を優先して取得する
+                        </label>
+                        <p class="description">Cloudflareを使用している環境で有効にしてください。</p>
+                    </td>
+                </tr>
+
+                <?php if ($is_hidden_mode): ?>
+                <tr style="background: #fff8e5; border-left: 4px solid #ffb900;">
+                    <th scope="row"><label for="github_token">🔓 [隠し機能] GitHub トークン</label></th>
+                    <td>
+                        <input name="github_token" type="password" id="github_token" value="<?php echo esc_attr($current_token); ?>" class="regular-text" placeholder="ghp_xxxx または github_pat_xxxx">
+                        <p class="description">裏モードで有効なAPIレートリミット回避用トークンです。</p>
+                    </td>
+                </tr>
+                <?php endif; ?>
+
             </table>
             <?php submit_button('設定を保存する', 'primary', 'ip_block_submit', true); ?>
         </form>
